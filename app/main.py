@@ -12,5 +12,5 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Safe AI Trading Bot", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Сын Антона", version="0.1.0", lifespan=lifespan)
 app.include_router(router)

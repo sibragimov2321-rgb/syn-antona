@@ -1,5 +1,5 @@
 [project]
-name = "safe-ai-trading-bot"
+name = "syn-antona"
 version = "0.1.0"
 description = "Safety-first Telegram trading bot foundation; paper trading only."
 requires-python = ">=3.12"

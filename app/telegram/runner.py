@@ -88,7 +88,7 @@ def dashboard_text() -> str:
 @router.message(CommandStart())
 async def start(message: Message) -> None:
     await message.answer(
-        "Добро пожаловать в AI Trading Bot.\n\n"
+        "Добро пожаловать в «Сын Антона».\n\n"
         "1. Выберите DEMO\n2. Виртуальный баланс: $10,000\n"
         "3. Пары: BTC/USDT, ETH/USDT\n4. Риск: Low\n\n"
         + dashboard_text(),

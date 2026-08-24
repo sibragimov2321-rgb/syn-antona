@@ -1,4 +1,4 @@
-# Safe AI Trading Bot
+# Сын Антона
 
 This is a **DEMO/testnet-only** Telegram algorithmic trading system. It has a rules-based Signal
 Engine, multi-timeframe confirmation, strict risk authorization, a virtual exchange, position
