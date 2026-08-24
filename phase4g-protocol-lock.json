@@ -1,0 +1,152 @@
+{
+  "phase": "4G_INDEPENDENT_CONFIRMATION",
+  "locked_before_confirmation_data_evaluation": true,
+  "strategy_version": "phase4g_volatility_expansion_1h_frozen_v1",
+  "strategy_config_hash": "1fc165201603485c20ebc9e4709e710fc9192fb25679f8b0dab730c8cd8301be",
+  "strategy_config": {
+    "version": "phase4g_volatility_expansion_1h_frozen_v1",
+    "source_phase": "4F",
+    "source_strategy": "VOLATILITY_EXPANSION:1h:v1",
+    "phase4f_protocol_sha256": "50cce2c210a0721f1e86b5f932a49f5550aa76c2d255c49c4e639d1cf2033642",
+    "phase4f_implementation_sha256": "0dd7815c36f0d9c70ffa85057b8cc7feeeb38ea7e1ae9c6894b53b03522aa606",
+    "timeframe": "1h",
+    "feature_pipeline": "phase4e.build_features:v1",
+    "allowed_regimes": [
+      "BREAKOUT",
+      "HIGH_VOLATILITY"
+    ],
+    "atr_percentile_minimum": "75",
+    "bollinger_width_minimum": "0.008",
+    "breakout_direction_required": true,
+    "momentum_acceleration_confirmation": true,
+    "signal_score": "min(96, 70 + atr_percentile * 0.2)",
+    "minimum_signal_score": 75,
+    "stop_atr": "2",
+    "reward_r": "3",
+    "expected_move_atr": "2.8",
+    "risk_profile": {
+      "risk_per_trade_pct": "0.005",
+      "max_position_notional": "500",
+      "max_leverage": "2",
+      "max_concurrent_positions": 2,
+      "max_daily_loss_pct": "0.02",
+      "min_risk_reward": "2",
+      "max_consecutive_losses": 3,
+      "cooldown_minutes": 30,
+      "max_volatility_pct": "0.04",
+      "max_spread_pct": "0.002"
+    },
+    "execution": {
+      "order_type": "market_taker",
+      "market_type": "spot_ohlcv_research",
+      "leverage": "1",
+      "market_impact_per_leg": "0.00005",
+      "cost_safety_margin_multiple": "0.50",
+      "same_candle_policy": "PositionManager.resolve_candle_exit"
+    }
+  },
+  "exchange_market_type": "spot",
+  "exchanges": [
+    "binance",
+    "bybit",
+    "okx",
+    "bitget"
+  ],
+  "assets": [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "ADA/USDT",
+    "LINK/USDT",
+    "AVAX/USDT",
+    "DOGE/USDT",
+    "LTC/USDT",
+    "BCH/USDT",
+    "SUI/USDT",
+    "NEAR/USDT"
+  ],
+  "timeframe": "1h",
+  "confirmation_start": "2024-08-24 14:30:00+00:00",
+  "confirmation_end": "2026-06-12 14:30:00+00:00",
+  "phase4f_final_holdout_start": "2026-06-19 14:30:00+00:00",
+  "phase4f_final_holdout_access": "FORBIDDEN",
+  "minimum_history_days": 365,
+  "minimum_candles": 8760,
+  "warmup_candles": 300,
+  "cost_multiples": {
+    "normal": "1",
+    "1.25x": "1.25",
+    "1.5x": "1.5",
+    "2x": "2"
+  },
+  "cost_profiles": {
+    "binance": {
+      "exchange": "binance",
+      "market_type": "spot",
+      "maker_fee": "0.001",
+      "taker_fee": "0.001",
+      "slippage": "0.00015",
+      "spread": "0.00008",
+      "tier": "non_vip",
+      "source": "https://academy.binance.com/articles/how-to-calculate-transaction-fees-on-binance"
+    },
+    "bybit": {
+      "exchange": "bybit",
+      "market_type": "spot",
+      "maker_fee": "0.001",
+      "taker_fee": "0.001",
+      "slippage": "0.00020",
+      "spread": "0.00010",
+      "tier": "non_vip",
+      "source": "https://www.bybit.com/en/help-center/article/Trading-Fee-Structure"
+    },
+    "okx": {
+      "exchange": "okx",
+      "market_type": "spot",
+      "maker_fee": "0.0008",
+      "taker_fee": "0.001",
+      "slippage": "0.00025",
+      "spread": "0.00012",
+      "tier": "non_vip",
+      "source": "https://www.okx.com/en-gb/help/advance-notice-spot-and-futures-trading-fee-adjustment"
+    },
+    "bitget": {
+      "exchange": "bitget",
+      "market_type": "spot",
+      "maker_fee": "0.001",
+      "taker_fee": "0.001",
+      "slippage": "0.00030",
+      "spread": "0.00015",
+      "tier": "non_vip",
+      "source": "https://www.bitget.com/en-CA/support/articles/12560603820584"
+    }
+  },
+  "execution_assumptions": {
+    "fees": "official non-VIP/base spot rates, no token discounts",
+    "spread_slippage": "pre-existing conservative venue profiles; OHLCV has no historical order book",
+    "market_impact_per_leg": "0.00005 inherited unchanged from Phase 4F",
+    "funding": "0 because dataset market type is spot",
+    "short_model": "unchanged Phase 4F synthetic short accounting on spot OHLCV; no borrow model"
+  },
+  "official_fee_sources": {
+    "binance": "https://academy.binance.com/articles/how-to-calculate-transaction-fees-on-binance",
+    "bybit": "https://www.bybit.com/en/help-center/article/Trading-Fee-Structure",
+    "okx": "https://www.okx.com/en-gb/help/advance-notice-spot-and-futures-trading-fee-adjustment",
+    "bitget": "https://www.bitget.com/en-CA/support/articles/12560603820584"
+  },
+  "statistical_protocol": {
+    "bootstrap_simulations": 2000,
+    "bootstrap_seed": 42,
+    "bootstrap_unit": "exchange-asset cluster",
+    "inherited_multiple_tests": 36,
+    "adequate_sample": "trades>=200, exchange-asset clusters>=20, active quarters>=6"
+  },
+  "decision_gate": {
+    "paper": "aggregate PF>1, expectancy>0, net PnL>0; >=3 positive assets; >=3 positive exchanges; quarter and half-year stability; no asset/exchange concentration; max DD<20%; survives 1.25x; CI lower>0; adjusted p<0.10; deflated Sharpe>0; adequate sample",
+    "research": "aggregate PF>1, expectancy>0, net PnL>0; >=2 positive assets; >=2 positive exchanges; survives 1.25x; adequate sample"
+  },
+  "parameter_changes_after_results": false,
+  "live_trading_enabled": false,
+  "real_orders_allowed": false
+}

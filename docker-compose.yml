@@ -1,0 +1,68 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  shadow:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-trader}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-trader}
+      LIVE_TRADING_ENABLED: "false"
+    command:
+      - python
+      - -m
+      - app.shadow.supervisor
+      - --protocol-lock
+      - /runtime/phase4i-prospective-lock.json
+      - --warmup-file
+      - /runtime/phase4i-warmup.json.gz
+      - --poll-seconds
+      - "60"
+    volumes:
+      - ./runtime:/runtime
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - app.shadow.watchdog
+        - --protocol-lock
+        - /runtime/phase4i-prospective-lock.json
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 10m
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trader}
+      POSTGRES_USER: ${POSTGRES_USER:-trader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trader} -d ${POSTGRES_DB:-trader}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

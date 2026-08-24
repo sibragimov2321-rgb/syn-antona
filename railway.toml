@@ -1,0 +1,8 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m app.shadow.supervisor --protocol-lock /app/phase4i-prospective-lock.json --warmup-file /app/phase4i-warmup.json.gz --poll-seconds 60 --watchdog-seconds 30"
+restartPolicyType = "ALWAYS"
+restartPolicyMaxRetries = 10

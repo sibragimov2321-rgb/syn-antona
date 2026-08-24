@@ -1,0 +1,1 @@
+"""Deterministic technical signal generation."""

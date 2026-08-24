@@ -1,0 +1,227 @@
+{
+  "phase": "4F",
+  "locked_before_data_evaluation": true,
+  "created_at": "2026-08-24 14:30:21.024612+00:00",
+  "exchange": "binance",
+  "market_type": "spot",
+  "symbols": [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT"
+  ],
+  "timeframes": [
+    "5m",
+    "15m",
+    "1h",
+    "4h"
+  ],
+  "boundaries": {
+    "start": "2024-08-24 14:30:00+00:00",
+    "train_end": "2025-08-24 14:30:00+00:00",
+    "validation_start": "2025-08-31 14:30:00+00:00",
+    "validation_end": "2026-01-17 14:30:00+00:00",
+    "walk_forward_start": "2026-01-24 14:30:00+00:00",
+    "walk_forward_end": "2026-06-12 14:30:00+00:00",
+    "holdout_start": "2026-06-19 14:30:00+00:00",
+    "end": "2026-08-24 14:30:00+00:00"
+  },
+  "hypotheses": [
+    {
+      "family": "TREND_FOLLOWING",
+      "timeframe": "5m",
+      "rationale": "Persistent information diffusion and risk-premium flows can extend established directional moves."
+    },
+    {
+      "family": "TREND_FOLLOWING",
+      "timeframe": "15m",
+      "rationale": "Persistent information diffusion and risk-premium flows can extend established directional moves."
+    },
+    {
+      "family": "TREND_FOLLOWING",
+      "timeframe": "1h",
+      "rationale": "Persistent information diffusion and risk-premium flows can extend established directional moves."
+    },
+    {
+      "family": "TREND_FOLLOWING",
+      "timeframe": "4h",
+      "rationale": "Persistent information diffusion and risk-premium flows can extend established directional moves."
+    },
+    {
+      "family": "BREAKOUT",
+      "timeframe": "5m",
+      "rationale": "Price leaving a well-observed range with participation can trigger stops and delayed positioning."
+    },
+    {
+      "family": "BREAKOUT",
+      "timeframe": "15m",
+      "rationale": "Price leaving a well-observed range with participation can trigger stops and delayed positioning."
+    },
+    {
+      "family": "BREAKOUT",
+      "timeframe": "1h",
+      "rationale": "Price leaving a well-observed range with participation can trigger stops and delayed positioning."
+    },
+    {
+      "family": "BREAKOUT",
+      "timeframe": "4h",
+      "rationale": "Price leaving a well-observed range with participation can trigger stops and delayed positioning."
+    },
+    {
+      "family": "MOMENTUM",
+      "timeframe": "5m",
+      "rationale": "Short-horizon continuation may persist when return acceleration is confirmed by participation."
+    },
+    {
+      "family": "MOMENTUM",
+      "timeframe": "15m",
+      "rationale": "Short-horizon continuation may persist when return acceleration is confirmed by participation."
+    },
+    {
+      "family": "MOMENTUM",
+      "timeframe": "1h",
+      "rationale": "Short-horizon continuation may persist when return acceleration is confirmed by participation."
+    },
+    {
+      "family": "MOMENTUM",
+      "timeframe": "4h",
+      "rationale": "Short-horizon continuation may persist when return acceleration is confirmed by participation."
+    },
+    {
+      "family": "VOLATILITY_EXPANSION",
+      "timeframe": "5m",
+      "rationale": "Volatility clustering can make the first confirmed expansion persist beyond its initial bar."
+    },
+    {
+      "family": "VOLATILITY_EXPANSION",
+      "timeframe": "15m",
+      "rationale": "Volatility clustering can make the first confirmed expansion persist beyond its initial bar."
+    },
+    {
+      "family": "VOLATILITY_EXPANSION",
+      "timeframe": "1h",
+      "rationale": "Volatility clustering can make the first confirmed expansion persist beyond its initial bar."
+    },
+    {
+      "family": "VOLATILITY_EXPANSION",
+      "timeframe": "4h",
+      "rationale": "Volatility clustering can make the first confirmed expansion persist beyond its initial bar."
+    },
+    {
+      "family": "PULLBACK_IN_TREND",
+      "timeframe": "5m",
+      "rationale": "Temporary liquidity-driven retracements inside a strong trend can revert toward trend direction."
+    },
+    {
+      "family": "PULLBACK_IN_TREND",
+      "timeframe": "15m",
+      "rationale": "Temporary liquidity-driven retracements inside a strong trend can revert toward trend direction."
+    },
+    {
+      "family": "PULLBACK_IN_TREND",
+      "timeframe": "1h",
+      "rationale": "Temporary liquidity-driven retracements inside a strong trend can revert toward trend direction."
+    },
+    {
+      "family": "PULLBACK_IN_TREND",
+      "timeframe": "4h",
+      "rationale": "Temporary liquidity-driven retracements inside a strong trend can revert toward trend direction."
+    },
+    {
+      "family": "MEAN_REVERSION_BASELINE",
+      "timeframe": "5m",
+      "rationale": "Temporary inventory imbalance in range regimes may mean-revert; retained only as a control."
+    },
+    {
+      "family": "MEAN_REVERSION_BASELINE",
+      "timeframe": "15m",
+      "rationale": "Temporary inventory imbalance in range regimes may mean-revert; retained only as a control."
+    },
+    {
+      "family": "MEAN_REVERSION_BASELINE",
+      "timeframe": "1h",
+      "rationale": "Temporary inventory imbalance in range regimes may mean-revert; retained only as a control."
+    },
+    {
+      "family": "MEAN_REVERSION_BASELINE",
+      "timeframe": "4h",
+      "rationale": "Temporary inventory imbalance in range regimes may mean-revert; retained only as a control."
+    },
+    {
+      "family": "MULTI_TIMEFRAME_TREND",
+      "timeframe": "5m",
+      "rationale": "Alignment across independently closed horizons may reduce false single-timeframe trends."
+    },
+    {
+      "family": "MULTI_TIMEFRAME_TREND",
+      "timeframe": "15m",
+      "rationale": "Alignment across independently closed horizons may reduce false single-timeframe trends."
+    },
+    {
+      "family": "MULTI_TIMEFRAME_TREND",
+      "timeframe": "1h",
+      "rationale": "Alignment across independently closed horizons may reduce false single-timeframe trends."
+    },
+    {
+      "family": "MULTI_TIMEFRAME_TREND",
+      "timeframe": "4h",
+      "rationale": "Alignment across independently closed horizons may reduce false single-timeframe trends."
+    },
+    {
+      "family": "REGIME_ADAPTIVE",
+      "timeframe": "5m",
+      "rationale": "Different return-generating mechanisms may dominate in trend, range, and expansion regimes."
+    },
+    {
+      "family": "REGIME_ADAPTIVE",
+      "timeframe": "15m",
+      "rationale": "Different return-generating mechanisms may dominate in trend, range, and expansion regimes."
+    },
+    {
+      "family": "REGIME_ADAPTIVE",
+      "timeframe": "1h",
+      "rationale": "Different return-generating mechanisms may dominate in trend, range, and expansion regimes."
+    },
+    {
+      "family": "REGIME_ADAPTIVE",
+      "timeframe": "4h",
+      "rationale": "Different return-generating mechanisms may dominate in trend, range, and expansion regimes."
+    },
+    {
+      "family": "VOLUME_VOL_CONFIRMATION",
+      "timeframe": "5m",
+      "rationale": "Unusually high participation plus volatility can identify genuine demand/supply imbalance."
+    },
+    {
+      "family": "VOLUME_VOL_CONFIRMATION",
+      "timeframe": "15m",
+      "rationale": "Unusually high participation plus volatility can identify genuine demand/supply imbalance."
+    },
+    {
+      "family": "VOLUME_VOL_CONFIRMATION",
+      "timeframe": "1h",
+      "rationale": "Unusually high participation plus volatility can identify genuine demand/supply imbalance."
+    },
+    {
+      "family": "VOLUME_VOL_CONFIRMATION",
+      "timeframe": "4h",
+      "rationale": "Unusually high participation plus volatility can identify genuine demand/supply imbalance."
+    }
+  ],
+  "cost_profile": {
+    "exchange": "binance",
+    "market_type": "spot",
+    "maker_fee": "0.001",
+    "taker_fee": "0.001",
+    "slippage": "0.00015",
+    "spread": "0.00008",
+    "tier": "non_vip",
+    "source": "https://academy.binance.com/articles/how-to-calculate-transaction-fees-on-binance"
+  },
+  "minimum_signal_score": 75,
+  "cost_safety_margin": "0.50x estimated round trip cost",
+  "market_impact_per_leg": "0.00005",
+  "experiment_count": 36,
+  "multiple_testing": "Bonferroni plus deflated Sharpe",
+  "funding_basis": "skip unless synchronized derivatives history exists",
+  "live_trading_enabled": false
+}

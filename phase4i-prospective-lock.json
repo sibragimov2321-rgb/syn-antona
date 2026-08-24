@@ -1,0 +1,110 @@
+{
+  "id": "PHASE4I_PROSPECTIVE_LOCK",
+  "locked_at": "2026-08-24T16:22:57.853634+00:00",
+  "strategy_version": "phase4g_volatility_expansion_1h_frozen_v1",
+  "strategy_config_hash": "1fc165201603485c20ebc9e4709e710fc9192fb25679f8b0dab730c8cd8301be",
+  "source_revision": {
+    "kind": "sha256_source_manifest",
+    "files": {
+      "app/strategy_lab/phase4f.py": "0dd7815c36f0d9c70ffa85057b8cc7feeeb38ea7e1ae9c6894b53b03522aa606",
+      "app/strategy_lab/phase4g.py": "901d0aa2cb24d66f4a526b72a236f0acd749fa0fd30f71b11c575c492c18acaa",
+      "app/risk/manager.py": "c28520ab78a1cb0aacb167764977ae21bae98b78a3b8845ff1042787f939b53b",
+      "app/trading/positions.py": "8707fab9d76fc23383813ad06fb7e303fd26f4b01f0f8503f0286f335807c281",
+      "app/shadow/engine.py": "85eee0bf0d3aeb06d77f1ae75f34d7103ff4165f58e11ef9711ed74980b48020"
+    },
+    "hash": "59730a641fba3c5d7e3f6a19db95d0c795d6ea56dad75b681c68cc5d81bbe3c2"
+  },
+  "exchanges": [
+    "binance",
+    "bybit",
+    "okx",
+    "bitget"
+  ],
+  "assets": [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "ADA/USDT",
+    "LINK/USDT",
+    "AVAX/USDT",
+    "DOGE/USDT",
+    "LTC/USDT",
+    "BCH/USDT",
+    "SUI/USDT",
+    "NEAR/USDT"
+  ],
+  "market_type": "spot_public_data",
+  "timeframe": "1h",
+  "decision_policy": "only after candle_open_time + 1h <= exchange_timestamp",
+  "warmup": {
+    "cutoff": "2026-08-24T16:00:00+00:00",
+    "candles_per_exchange_asset": 300,
+    "purpose": "indicator initialization only; no training or selection",
+    "data_hash": "866e31cc40f41aefb986b85478ec20b656456e9dcc39785885a36e91d693ed6c"
+  },
+  "fee_assumptions": {
+    "binance": {
+      "exchange": "binance",
+      "market_type": "spot",
+      "maker_fee": "0.001",
+      "taker_fee": "0.001",
+      "slippage": "0.00015",
+      "spread": "0.00008",
+      "tier": "non_vip",
+      "source": "https://academy.binance.com/articles/how-to-calculate-transaction-fees-on-binance"
+    },
+    "bybit": {
+      "exchange": "bybit",
+      "market_type": "spot",
+      "maker_fee": "0.001",
+      "taker_fee": "0.001",
+      "slippage": "0.00020",
+      "spread": "0.00010",
+      "tier": "non_vip",
+      "source": "https://www.bybit.com/en/help-center/article/Trading-Fee-Structure"
+    },
+    "okx": {
+      "exchange": "okx",
+      "market_type": "spot",
+      "maker_fee": "0.0008",
+      "taker_fee": "0.001",
+      "slippage": "0.00025",
+      "spread": "0.00012",
+      "tier": "non_vip",
+      "source": "https://www.okx.com/en-gb/help/advance-notice-spot-and-futures-trading-fee-adjustment"
+    },
+    "bitget": {
+      "exchange": "bitget",
+      "market_type": "spot",
+      "maker_fee": "0.001",
+      "taker_fee": "0.001",
+      "slippage": "0.00030",
+      "spread": "0.00015",
+      "tier": "non_vip",
+      "source": "https://www.bitget.com/en-CA/support/articles/12560603820584"
+    }
+  },
+  "slippage_model": "venue profile + frozen 0.00005 market impact per leg",
+  "spread_model": "observed top-of-book bid/ask for shadow fills; frozen modeled spread remains in signal cost gate",
+  "risk_settings": {
+    "risk_per_trade_pct": "0.005",
+    "max_position_notional": "500",
+    "max_leverage": "2",
+    "max_concurrent_positions": 2,
+    "max_daily_loss_pct": "0.02",
+    "min_risk_reward": "2",
+    "max_consecutive_losses": 3,
+    "cooldown_minutes": 30,
+    "max_volatility_pct": "0.04",
+    "max_spread_pct": "0.002"
+  },
+  "starting_balance_per_exchange_asset": "1000",
+  "maximum_trades_per_day": null,
+  "minimum_observation_days": 30,
+  "correlation_policy": "exchange copies of one asset are clustered, not independent trades",
+  "strategy_changes_after_lock": false,
+  "private_api_keys_required": false,
+  "live_trading_enabled": false,
+  "real_orders_allowed": false
+}

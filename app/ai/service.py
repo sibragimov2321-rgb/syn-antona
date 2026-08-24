@@ -1,0 +1,87 @@
+import asyncio
+import json
+import time
+from dataclasses import dataclass
+from decimal import Decimal
+
+import httpx
+
+from app.ai.models import AIResult, MarketContext, RiskLevel, RoleResult, Trend
+from app.core.config import Settings
+from app.domain.models import Decision, Signal
+
+
+class AIUnavailable(RuntimeError): pass
+class AIRateLimited(AIUnavailable): pass
+
+
+class AIProvider:
+    async def complete(self, prompt: str, schema: type[AIResult]) -> dict: raise NotImplementedError
+
+
+class MockAIProvider(AIProvider):
+    def __init__(self, response: dict | Exception): self.response = response; self.calls = 0
+    async def complete(self, prompt: str, schema: type[AIResult]) -> dict:
+        self.calls += 1
+        if isinstance(self.response, Exception): raise self.response
+        return self.response
+
+
+class OpenAICompatibleProvider(AIProvider):
+    """OpenAI/OpenRouter compatible HTTP client. Output is always parsed as untrusted JSON."""
+    def __init__(self, settings: Settings): self.settings = settings
+    async def complete(self, prompt: str, schema: type[AIResult]) -> dict:
+        if not self.settings.ai_api_key: raise AIUnavailable("AI API key is not configured")
+        base = "https://api.openai.com/v1" if self.settings.ai_provider == "openai" else "https://openrouter.ai/api/v1"
+        headers = {"Authorization": f"Bearer {self.settings.ai_api_key}"}
+        body = {"model": self.settings.ai_model, "messages": [{"role":"system","content":"Return JSON only."},{"role":"user","content":prompt}], "response_format":{"type":"json_object"}}
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.ai_timeout) as client:
+                response = await client.post(f"{base}/chat/completions", headers=headers, json=body)
+            if response.status_code == 429: raise AIRateLimited("AI rate limited")
+            response.raise_for_status()
+            return json.loads(response.json()["choices"][0]["message"]["content"])
+        except (httpx.HTTPError, KeyError, ValueError) as error:
+            raise AIUnavailable("AI provider unavailable or returned invalid data") from error
+
+
+@dataclass
+class AIUsage: requests: int = 0; estimated_cost: Decimal = Decimal(); last_hour: list[float] = None
+def default_usage() -> AIUsage: return AIUsage(last_hour=[])
+
+
+class AIAnalyst:
+    prompt_version = "final_v1"
+    def __init__(self, provider: AIProvider, settings: Settings, usage: AIUsage | None = None):
+        self.provider, self.settings, self.usage, self.cache = provider, settings, usage or default_usage(), {}
+    async def analyze(self, context: MarketContext) -> AIResult | None:
+        key = context.model_dump_json()
+        if key in self.cache: return self.cache[key]
+        now = time.time(); self.usage.last_hour = [x for x in self.usage.last_hour if now-x < 3600]
+        if len(self.usage.last_hour) >= self.settings.ai_max_requests_per_hour: raise AIRateLimited("Hourly AI request limit")
+        for attempt in range(3):
+            try:
+                raw = await self.provider.complete(context.model_dump_json(), AIResult)
+                result = AIResult.model_validate(raw); self._validate_market_prices(result, context)
+                self.cache[key] = result; self.usage.requests += 1; self.usage.last_hour.append(now); return result
+            except (AIUnavailable, AIRateLimited):
+                if attempt == 2:
+                    if self.settings.ai_required: return None
+                    return AIResult(decision=Decision.WAIT, confidence=0, trend_score=0, momentum_score=0, volatility_score=0, setup_quality=0, reasons=("AI unavailable",))
+                await asyncio.sleep(0.05 * (2**attempt))
+    @staticmethod
+    def _validate_market_prices(result: AIResult, context: MarketContext) -> None:
+        if result.decision is Decision.WAIT: return
+        if abs(result.suggested_entry-context.current_price) / context.current_price > Decimal("0.03"): raise ValueError("AI entry too distant")
+        if abs(result.suggested_entry-result.suggested_stop_loss) > context.atr * Decimal("5"): raise ValueError("AI stop too distant")
+
+
+class AIConsensusEngine:
+    def aggregate(self, technical: Signal, trend: RoleResult, momentum: RoleResult, risk: RoleResult, final: AIResult) -> Signal:
+        if risk.risk is RiskLevel.EXTREME: return Signal(technical.symbol, technical.timeframe, Decision.WAIT, 0, 0, 0, 0, ("Extreme AI risk",))
+        ai_directions = [Trend.BULLISH if final.decision is Decision.LONG else Trend.BEARISH if final.decision is Decision.SHORT else Trend.NEUTRAL, trend.direction, momentum.direction]
+        technical_direction = Trend.BULLISH if technical.decision is Decision.LONG else Trend.BEARISH if technical.decision is Decision.SHORT else Trend.NEUTRAL
+        if technical_direction is not Trend.NEUTRAL and sum(item is technical_direction for item in ai_directions) < 2: return Signal(technical.symbol, technical.timeframe, Decision.WAIT, 0, 0, 0, 0, ("AI/technical disagreement",))
+        score = int(technical.signal_score*.35 + trend.score*.20 + momentum.score*.15 + final.setup_quality*.20 + risk.score*.10)
+        decision = final.decision if score >= 70 and final.decision is technical.decision else Decision.WAIT
+        return Signal(technical.symbol, technical.timeframe, decision, score, final.trend_score, final.momentum_score, final.volatility_score, final.reasons, final.suggested_entry, final.suggested_stop_loss, final.suggested_take_profit, Decimal("2"))
