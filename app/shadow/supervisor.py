@@ -1,4 +1,6 @@
 import argparse
+import asyncio
+from datetime import UTC, datetime, timedelta
 import logging
 import os
 from pathlib import Path
@@ -10,12 +12,41 @@ import time
 import uuid
 
 from app.core.config import get_settings
+from app.shadow.engine import PROTOCOL_ID
 from app.shadow.logging import configure_structured_logging, log_event
+from app.shadow.notifier import ShadowNotifier
 from app.shadow.repository import ShadowRepository
 from app.shadow.watchdog import check_health
 
 
 logger = logging.getLogger(__name__)
+
+
+def _alert_collector_stopped(settings, reason: str) -> None:
+    repository = ShadowRepository()
+    now = datetime.now(UTC)
+    event_id, created = repository.record_system_event(
+        PROTOCOL_ID,
+        "COLLECTOR_STOPPED",
+        "ERROR",
+        reason,
+        dedupe_since=now - timedelta(hours=1),
+    )
+    if not created:
+        return
+
+    async def deliver() -> bool:
+        notifier = ShadowNotifier(
+            settings.telegram_bot_token,
+            settings.admin_telegram_ids,
+        )
+        try:
+            return await notifier.system("COLLECTOR STOPPED", reason)
+        finally:
+            await notifier.close()
+
+    if asyncio.run(deliver()):
+        repository.mark_event_alerted(event_id, now)
 
 
 def _stop(process: subprocess.Popen) -> None:
@@ -116,6 +147,16 @@ def main() -> None:
             "collector_process_restart",
             {"reason": restart_reason, "delay_seconds": restart_delay},
         )
+        try:
+            _alert_collector_stopped(settings, restart_reason)
+        except Exception:
+            log_event(
+                logger,
+                logging.ERROR,
+                "collector_stopped_alert_failed",
+                {"reason": restart_reason},
+                exc_info=True,
+            )
         stop_event.wait(restart_delay)
         restart_delay = min(60, restart_delay * 2)
     if process and process.poll() is None:

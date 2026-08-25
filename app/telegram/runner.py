@@ -12,6 +12,13 @@ from app.domain.models import BotState
 from app.market.synthetic import SyntheticDemoData
 from app.shadow.engine import PROTOCOL_ID
 from app.shadow.repository import ShadowRepository, shadow_metrics
+from app.shadow.signal_wait_status import (
+    BybitSignalWaitReader,
+    SignalWaitStatusRepository,
+    SignalWaitStatusService,
+    format_signal_wait_status,
+    format_wait_reasons,
+)
 from app.shadow.status import telegram_system_status
 from app.statistics import calculate_statistics
 from app.trading.controlled_live import ControlledLiveRepository
@@ -101,6 +108,40 @@ def dashboard_text() -> str:
     )
 
 
+def signal_wait_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Проверить сигнал сейчас",
+                    callback_data="shadow:signal",
+                ),
+                InlineKeyboardButton(
+                    text="📊 Почему WAIT?",
+                    callback_data="shadow:why",
+                ),
+            ]
+        ]
+    )
+
+
+async def current_signal_wait_status():
+    settings = get_settings()
+    try:
+        reader = BybitSignalWaitReader.from_environment()
+    except (ValueError, RuntimeError):
+        reader = None
+    service = SignalWaitStatusService(
+        SignalWaitStatusRepository(SessionLocal),
+        reader,
+        heartbeat_max_age_seconds=settings.shadow_heartbeat_max_age_seconds,
+    )
+    try:
+        return await service.snapshot()
+    finally:
+        await service.close()
+
+
 @router.message(CommandStart())
 async def start(message: Message) -> None:
     await message.answer(
@@ -116,7 +157,8 @@ async def start(message: Message) -> None:
 @router.callback_query()
 async def actions(callback: CallbackQuery) -> None:
     emergency_actions = {"bot:emergency", "emergency:keep", "emergency:close"}
-    admin_only = callback.data in emergency_actions or bool(
+    shadow_private_actions = {"shadow", "shadow:signal", "shadow:why"}
+    admin_only = callback.data in emergency_actions | shadow_private_actions or bool(
         callback.data and callback.data.startswith("phase5e:")
     )
     if admin_only and not is_admin_telegram_user(
@@ -221,7 +263,28 @@ async def actions(callback: CallbackQuery) -> None:
                 f"Максимальная просадка: ${metrics['max_drawdown']}\n"
                 f"Хэш протокола: <code>{protocol.protocol_hash}</code>"
             )
-        await callback.message.answer(text, parse_mode="HTML")
+            wait_status = await current_signal_wait_status()
+            text += "\n\n" + format_signal_wait_status(wait_status)
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=signal_wait_keyboard() if protocol else None,
+        )
+    elif callback.data == "shadow:signal":
+        # Read-only refresh: no market fetch into the strategy and no decision run.
+        wait_status = await current_signal_wait_status()
+        await callback.message.answer(
+            format_signal_wait_status(wait_status),
+            parse_mode="HTML",
+            reply_markup=signal_wait_keyboard(),
+        )
+    elif callback.data == "shadow:why":
+        wait_status = await current_signal_wait_status()
+        await callback.message.answer(
+            format_wait_reasons(wait_status),
+            parse_mode="HTML",
+            reply_markup=signal_wait_keyboard(),
+        )
     elif callback.data == "shadow:status":
         await callback.message.answer(
             telegram_system_status(ShadowRepository()), parse_mode="HTML"

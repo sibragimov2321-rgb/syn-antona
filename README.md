@@ -248,6 +248,19 @@ CONTROLLED_LIVE_ENABLED=false
 MANUAL_FIRST_ORDER_APPROVED=false
 ```
 
+### Phase 5E.1 Telegram signal-wait status
+
+The admin-only Shadow section shows a read-only `ОЖИДАНИЕ СИГНАЛА` block for SOLUSDT. Its
+candle, analysis time, decision counters and WAIT reason come only from persisted PostgreSQL
+records created after the Phase 5E cursor. Its equity/position/order values use the strict
+GET-only Bybit client. `Проверить сигнал сейчас` only refreshes those reads and rejects any candle
+whose close time is in the future; it cannot invoke the strategy or create a decision.
+
+`Почему WAIT?` prints only `risk_reason`/`context.reason` already stored by the frozen pipeline.
+Normal WAIT decisions never generate Telegram notifications. Existing transition alerts remain
+limited to the first eligible proposal, exchange OFFLINE/restored, stale data, collector stop and
+collector restart. All three execution gates remain false and `DRY_RUN=true`.
+
 ## Phase 4G frozen cross-confirmation
 
 Phase 4G independently validates the exact Phase 4F `VOLATILITY_EXPANSION:1h:v1` configuration.

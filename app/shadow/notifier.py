@@ -91,16 +91,17 @@ class ShadowNotifier:
                 delivered += 1
         return delivered
 
-    async def system(self, title: str, message: str) -> None:
+    async def system(self, title: str, message: str) -> bool:
         translated_titles = {
             "STALE DATA": "УСТАРЕВШИЕ ДАННЫЕ",
             "EXCHANGE OFFLINE": "БИРЖА НЕДОСТУПНА",
             "EXCHANGE RESTORED": "БИРЖА СНОВА ДОСТУПНА",
             "COLLECTOR RESTARTED": "COLLECTOR ПЕРЕЗАПУЩЕН",
+            "COLLECTOR STOPPED": "COLLECTOR ОСТАНОВЛЕН",
             "PROTOCOL HASH MISMATCH": "НЕСОВПАДЕНИЕ ХЭША ПРОТОКОЛА",
             "SHADOW DATABASE/COLLECTOR FAILURE": "ОШИБКА SHADOW-БАЗЫ ИЛИ COLLECTOR",
         }
-        await self._send(
+        return await self._send(
             f"⚠️ <b>{escape(translated_titles.get(title, title))}</b>\n\n"
             f"{escape(message)}"
         )
