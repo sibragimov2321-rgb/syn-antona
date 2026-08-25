@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import signal
 import socket
 import uuid
 
@@ -147,6 +148,17 @@ async def run(arguments) -> None:
         repository=repository,
         protocol_id=PROTOCOL_ID,
     )
+    current_task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    installed_signals: list[signal.Signals] = []
+    if current_task is not None:
+        for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(shutdown_signal, current_task.cancel)
+                installed_signals.append(shutdown_signal)
+            except (NotImplementedError, RuntimeError):
+                # Windows event loops and embedded runtimes may not expose signal handlers.
+                break
     lease_acquired = False
     try:
         repository.ping()
@@ -378,6 +390,8 @@ async def run(arguments) -> None:
                     "collector_lease_release_failed",
                     exc_info=True,
                 )
+        for shutdown_signal in installed_signals:
+            loop.remove_signal_handler(shutdown_signal)
         await notifier.close()
         await market.close()
 
@@ -400,6 +414,8 @@ def main() -> None:
     arguments = parser.parse_args()
     try:
         asyncio.run(run(arguments))
+    except asyncio.CancelledError:
+        return
     except KeyboardInterrupt:
         return
     except RuntimeError as error:
