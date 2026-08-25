@@ -105,6 +105,8 @@ class ControlledLiveStateRecord(Base):
 
     profile_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     profile_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    first_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    selection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     kill_switch_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     first_order_in_progress: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
@@ -126,6 +128,7 @@ class ControlledLiveProposalRecord(Base):
     proposal_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     profile_name: Mapped[str] = mapped_column(String(64), index=True)
     profile_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    selection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     admin_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source: Mapped[str] = mapped_column(String(48), nullable=False)
     preview_json: Mapped[str] = mapped_column(Text, nullable=False)

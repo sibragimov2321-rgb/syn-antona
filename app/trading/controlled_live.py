@@ -29,6 +29,12 @@ from app.exchanges.models import InstrumentRules, OrderSide
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1.json"
 CONTROLLED_LIVE_V1_HASH = "f9aef880cc9ac20b80d6db01adf8c0dab6e6085d84fd872889611013b1e69079"
+FIRST_INSTRUMENT_PATH = (
+    Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1_first_symbol.json"
+)
+CONTROLLED_LIVE_V1_FIRST_INSTRUMENT_HASH = (
+    "63a3b52a6aecc19202d778ba6a50885eb9f8db9707bfc9aec5defc358e08a73b"
+)
 MANUAL_SOURCE = "MANUAL_EXECUTION_VALIDATION"
 BYBIT_TAKER_FEE_RATE = Decimal("0.00055")
 
@@ -97,10 +103,49 @@ CONTROLLED_LIVE_V1 = load_controlled_live_profile()
 
 
 @dataclass(frozen=True)
+class FirstInstrumentSelection:
+    symbol: str
+    internal_symbol: str
+    exchange: str
+    market_type: str
+    base_profile_hash: str
+    first_order_notional_cap: Decimal
+    selection_hash: str
+
+
+def load_first_instrument_selection(
+    path: Path = FIRST_INSTRUMENT_PATH,
+) -> FirstInstrumentSelection:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    canonical = json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
+    selection_hash = hashlib.sha256(canonical).hexdigest()
+    if path == FIRST_INSTRUMENT_PATH and selection_hash != CONTROLLED_LIVE_V1_FIRST_INSTRUMENT_HASH:
+        raise RuntimeError("CONTROLLED_LIVE_V1 first-instrument hash mismatch")
+    if raw["base_profile_hash"] != CONTROLLED_LIVE_V1.config_hash:
+        raise RuntimeError("First-instrument selection does not match CONTROLLED_LIVE_V1")
+    return FirstInstrumentSelection(
+        symbol=raw["symbol"],
+        internal_symbol=raw["internal_symbol"],
+        exchange=raw["exchange"],
+        market_type=raw["market_type"],
+        base_profile_hash=raw["base_profile_hash"],
+        first_order_notional_cap=Decimal(
+            raw["runtime_rules"]["first_order_notional_cap"]
+        ),
+        selection_hash=selection_hash,
+    )
+
+
+CONTROLLED_LIVE_V1_FIRST_INSTRUMENT = load_first_instrument_selection()
+CONTROLLED_LIVE_V1_FIRST_SYMBOL = CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.symbol
+
+
+@dataclass(frozen=True)
 class ArmingGates:
     live_trading_enabled: bool
     controlled_live_enabled: bool
     manual_first_order_approved: bool
+    first_symbol: str | None = None
 
     @classmethod
     def from_environment(cls) -> ArmingGates:
@@ -108,9 +153,10 @@ class ArmingGates:
             _env_true("LIVE_TRADING_ENABLED"),
             _env_true("CONTROLLED_LIVE_ENABLED"),
             _env_true("MANUAL_FIRST_ORDER_APPROVED"),
+            os.getenv("CONTROLLED_LIVE_V1_FIRST_SYMBOL"),
         )
 
-    def require_all(self) -> None:
+    def require_all(self, *, expected_symbol: str | None = None) -> None:
         disabled = [
             name
             for name, enabled in (
@@ -122,6 +168,10 @@ class ArmingGates:
         ]
         if disabled:
             raise ControlledLiveBlocked("Order submission gates are disabled: " + ", ".join(disabled))
+        if expected_symbol is not None and self.first_symbol != expected_symbol:
+            raise ControlledLiveBlocked(
+                "CONTROLLED_LIVE_V1_FIRST_SYMBOL does not match the immutable selection"
+            )
 
 
 def _env_true(name: str) -> bool:
@@ -152,6 +202,7 @@ class ManualExecutionPreview:
     proposal_id: str
     profile_name: str
     profile_hash: str
+    selection_hash: str
     source: str
     symbol: str
     side: str
@@ -189,6 +240,7 @@ def build_manual_preview(
     rules: InstrumentRules,
     *,
     profile: ControlledLiveProfile = CONTROLLED_LIVE_V1,
+    instrument: FirstInstrumentSelection = CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
     now: datetime | None = None,
 ) -> ManualExecutionPreview:
     now = now or datetime.now(UTC)
@@ -212,7 +264,7 @@ def build_manual_preview(
             + inputs.stop_loss * BYBIT_TAKER_FEE_RATE
         )
         risk_quantity = risk_budget / loss_and_fee_per_unit
-        cap = min(profile.first_execution_notional_cap, profile.max_position_notional)
+        cap = min(instrument.first_order_notional_cap, profile.max_position_notional)
         cap_quantity = cap / inputs.reference_price
         raw_quantity = min(risk_quantity, cap_quantity)
         quantity = (
@@ -240,8 +292,9 @@ def build_manual_preview(
         proposal_id=proposal_id,
         profile_name=profile.name,
         profile_hash=profile.config_hash,
+        selection_hash=instrument.selection_hash,
         source=MANUAL_SOURCE,
-        symbol=profile.exchange_symbol,
+        symbol=instrument.symbol,
         side=inputs.side.value,
         quantity=quantity,
         expected_notional=expected_notional,
@@ -315,9 +368,15 @@ def format_preview_ru(preview: ManualExecutionPreview) -> str:
 
 
 class ControlledLiveRepository:
-    def __init__(self, session_factory, profile: ControlledLiveProfile = CONTROLLED_LIVE_V1):
+    def __init__(
+        self,
+        session_factory,
+        profile: ControlledLiveProfile = CONTROLLED_LIVE_V1,
+        instrument: FirstInstrumentSelection = CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
+    ):
         self.session_factory = session_factory
         self.profile = profile
+        self.instrument = instrument
 
     def state(self) -> ControlledLiveStateRecord:
         with self.session_factory() as session:
@@ -326,11 +385,14 @@ class ControlledLiveRepository:
                 state = ControlledLiveStateRecord(
                     profile_name=self.profile.name,
                     profile_hash=self.profile.config_hash,
+                    first_symbol=self.instrument.symbol,
+                    selection_hash=self.instrument.selection_hash,
                     updated_at=datetime.now(UTC),
                 )
                 session.add(state)
                 session.commit()
             self._verify_hash(state.profile_hash)
+            self._verify_selection(state.first_symbol, state.selection_hash)
             session.expunge(state)
             return state
 
@@ -346,6 +408,7 @@ class ControlledLiveRepository:
                     proposal_hash=preview.proposal_hash,
                     profile_name=self.profile.name,
                     profile_hash=self.profile.config_hash,
+                    selection_hash=self.instrument.selection_hash,
                     admin_telegram_id=admin_id,
                     source=preview.source,
                     preview_json=json.dumps(preview.safe_dict(), sort_keys=True),
@@ -367,6 +430,7 @@ class ControlledLiveRepository:
             if record is None or record.admin_telegram_id != admin_id:
                 raise ControlledLiveBlocked("Proposal is missing or belongs to another admin")
             self._verify_hash(record.profile_hash)
+            self._verify_selection(self.instrument.symbol, record.selection_hash)
             if record.status != "PREVIEWED":
                 raise ControlledLiveBlocked("Proposal is not awaiting approval")
             record.status = "APPROVED"
@@ -383,6 +447,8 @@ class ControlledLiveRepository:
                 raise ControlledLiveBlocked("Approved persistent proposal/state is missing")
             self._verify_hash(record.profile_hash)
             self._verify_hash(state.profile_hash)
+            self._verify_selection(self.instrument.symbol, record.selection_hash)
+            self._verify_selection(state.first_symbol, state.selection_hash)
             if state.first_order_in_progress or state.first_order_executed:
                 raise ControlledLiveBlocked("First Mainnet order was already claimed or executed")
             if record.proposal_hash != preview.proposal_hash or record.status != "APPROVED":
@@ -399,7 +465,7 @@ class ControlledLiveRepository:
                     exchange="bybit",
                     account_id=account_id,
                     client_order_id=preview.client_order_id,
-                    symbol=self.profile.symbol,
+                    symbol=self.instrument.internal_symbol,
                     side=preview.side,
                     quantity=preview.quantity,
                     request_hash=preview.proposal_hash,
@@ -452,6 +518,8 @@ class ControlledLiveRepository:
                 state = ControlledLiveStateRecord(
                     profile_name=self.profile.name,
                     profile_hash=self.profile.config_hash,
+                    first_symbol=self.instrument.symbol,
+                    selection_hash=self.instrument.selection_hash,
                 )
                 session.add(state)
             self._verify_hash(state.profile_hash)
@@ -511,6 +579,13 @@ class ControlledLiveRepository:
         if value != self.profile.config_hash:
             raise ControlledLiveBlocked("CONTROLLED_LIVE_V1 profile hash mismatch")
 
+    def _verify_selection(self, symbol: str, selection_hash: str) -> None:
+        if (
+            symbol != self.instrument.symbol
+            or selection_hash != self.instrument.selection_hash
+        ):
+            raise ControlledLiveBlocked("CONTROLLED_LIVE_V1 first-instrument mismatch")
+
 
 @dataclass(frozen=True)
 class LiveFill:
@@ -535,7 +610,19 @@ class LiveGatewaySnapshot:
     fill_order_ids: frozenset[str]
 
 
+@dataclass(frozen=True)
+class CurrentInstrumentState:
+    symbol: str
+    status: str
+    ask_price: Decimal
+    minimum_quantity: Decimal
+    quantity_step: Decimal
+    minimum_notional: Decimal
+
+
 class ControlledLiveGateway(Protocol):
+    async def current_instrument_state(self, symbol: str) -> CurrentInstrumentState: ...
+
     async def submit_market(
         self, preview: ManualExecutionPreview, client_order_id: str
     ) -> LiveFill: ...
@@ -565,11 +652,13 @@ class ManualExecutionService:
         admin_ids: set[int],
         *,
         profile: ControlledLiveProfile = CONTROLLED_LIVE_V1,
+        instrument: FirstInstrumentSelection = CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
     ) -> None:
         self.repository = repository
         self.gateway = gateway
         self.admin_ids = set(admin_ids)
         self.profile = profile
+        self.instrument = instrument
 
     def preview(
         self,
@@ -579,7 +668,9 @@ class ManualExecutionService:
         rules: InstrumentRules,
     ) -> ManualExecutionPreview:
         self._require_admin(admin_id)
-        preview = build_manual_preview(inputs, risk, rules, profile=self.profile)
+        preview = build_manual_preview(
+            inputs, risk, rules, profile=self.profile, instrument=self.instrument
+        )
         if preview.executable:
             self.repository.state()
             self.repository.save_preview(preview, admin_id)
@@ -598,9 +689,13 @@ class ManualExecutionService:
         gates: ArmingGates | None = None,
     ) -> LiveFill:
         self._require_admin(admin_id)
-        (gates or ArmingGates.from_environment()).require_all()
+        (gates or ArmingGates.from_environment()).require_all(
+            expected_symbol=self.instrument.symbol
+        )
         if preview.source != MANUAL_SOURCE:
             raise ControlledLiveBlocked("Strategy and AI cannot submit the first Mainnet order")
+        current = await self.gateway.current_instrument_state(self.instrument.symbol)
+        self._validate_current_instrument(preview, current)
         self.repository.claim_submission(preview, account_id)
         try:
             fill = await self.gateway.submit_market(preview, preview.client_order_id)
@@ -617,7 +712,7 @@ class ManualExecutionService:
         try:
             await self.gateway.install_native_protection(
                 fill,
-                symbol=self.profile.exchange_symbol,
+                symbol=self.instrument.symbol,
                 stop_loss=preview.stop_loss,
                 take_profit=preview.take_profit,
                 reduce_only=True,
@@ -625,7 +720,7 @@ class ManualExecutionService:
         except Exception as protection_error:
             try:
                 await self.gateway.emergency_close_reduce_only(
-                    fill, self.profile.exchange_symbol
+                    fill, self.instrument.symbol
                 )
             except Exception as close_error:
                 self.repository.mark_unknown(preview, close_error)
@@ -642,12 +737,12 @@ class ManualExecutionService:
     async def emergency_stop(self, admin_id: int, *, close_position: bool) -> dict[str, Any]:
         self._require_admin(admin_id)
         self.repository.activate_kill_switch()
-        cancelled = await self.gateway.cancel_pending_orders(self.profile.exchange_symbol)
+        cancelled = await self.gateway.cancel_pending_orders(self.instrument.symbol)
         closed = 0
         if close_position:
             snapshot = await self.gateway.snapshot()
             for position in snapshot.positions:
-                if position.symbol != self.profile.exchange_symbol:
+                if position.symbol != self.instrument.symbol:
                     continue
                 fill = LiveFill(
                     order_id="emergency",
@@ -657,7 +752,7 @@ class ManualExecutionService:
                     fee=Decimal(),
                 )
                 await self.gateway.emergency_close_reduce_only(
-                    fill, self.profile.exchange_symbol
+                    fill, self.instrument.symbol
                 )
                 closed += 1
         return {"kill_switch": "ACTIVE", "cancelled_orders": cancelled, "closed_positions": closed}
@@ -671,7 +766,7 @@ class ManualExecutionService:
             fill_match = bool(record.exchange_order_id) and record.exchange_order_id in snapshot.fill_order_ids
             position_match = any(
                 item.position_id == record.position_id
-                and item.symbol == self.profile.exchange_symbol
+                and item.symbol == self.instrument.symbol
                 and item.quantity == preview.quantity
                 for item in snapshot.positions
             )
@@ -691,3 +786,25 @@ class ManualExecutionService:
     def _require_admin(self, admin_id: int) -> None:
         if admin_id not in self.admin_ids:
             raise ControlledLiveBlocked("ADMIN_TELEGRAM_IDS authorization required")
+
+    def _validate_current_instrument(
+        self,
+        preview: ManualExecutionPreview,
+        current: CurrentInstrumentState,
+    ) -> None:
+        if current.symbol != self.instrument.symbol or current.status != "Trading":
+            raise ControlledLiveBlocked("Selected USDT perpetual is not currently available")
+        if current.quantity_step <= 0 or preview.quantity % current.quantity_step != 0:
+            raise ControlledLiveBlocked("Quantity no longer matches the current instrument step")
+        if preview.quantity < current.minimum_quantity:
+            raise ControlledLiveBlocked("Quantity is below the current instrument minimum")
+        actual_minimum = max(
+            current.minimum_notional,
+            current.minimum_quantity * current.ask_price,
+        )
+        if actual_minimum < Decimal("5") or actual_minimum > Decimal("10"):
+            raise ControlledLiveBlocked(
+                "Current minimum order notional is outside the immutable $5-$10 range"
+            )
+        if preview.quantity * current.ask_price > self.instrument.first_order_notional_cap:
+            raise ControlledLiveBlocked("Current ask price exceeds the first-order notional cap")

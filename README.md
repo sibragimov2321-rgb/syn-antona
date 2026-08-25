@@ -195,6 +195,22 @@ membership in `ADMIN_TELEGRAM_IDS`.
 Phase 5A does not include or instantiate a production order HTTP gateway. All execution-path tests
 use deterministic fakes. The three gates must remain false until a separate explicit authorization.
 
+### Phase 5B first-instrument selection
+
+`CONTROLLED_LIVE_V1_FIRST_SYMBOL=SOLUSDT` is frozen separately from the original Phase 5A profile
+in [controlled_live_v1_first_symbol.json](config/controlled_live_v1_first_symbol.json), selection
+hash `63a3b52a6aecc19202d778ba6a50885eb9f8db9707bfc9aec5defc358e08a73b`. The choice uses Bybit's
+own Mainnet linear-perpetual instrument and ticker data. At selection, `0.1 SOL` was approximately
+`$9.80`; SOL had the highest 24-hour turnover among the non-BTC candidates whose actual minimum
+order fitted `$5–10`.
+
+The Phase 5B supplement raises only the manual infrastructure-validation first-order cap to `$10`;
+all other `CONTROLLED_LIVE_V1` risk limits remain unchanged. Immediately before any future submit,
+the coordinator must re-fetch status, ask price, minimum quantity, quantity step and minimum
+notional. It blocks if `0.1 SOL × ask` moves above `$10`, if the contract is not `Trading`, or if the
+quantity no longer matches Bybit's current rules. This check occurs before the durable submission
+claim and before any HTTP order request.
+
 ## Phase 4G frozen cross-confirmation
 
 Phase 4G independently validates the exact Phase 4F `VOLATILITY_EXPANSION:1h:v1` configuration.
