@@ -24,6 +24,13 @@ def test_client_repr_and_errors_never_expose_credentials() -> None:
         asyncio.run(client.close())
 
 
+def test_client_rejects_non_official_mainnet_endpoint() -> None:
+    with pytest.raises(ValueError, match="official Mainnet"):
+        BybitMainnetReadOnlyClient(
+            "key", "secret", base_url="https://example.invalid"
+        )
+
+
 @pytest.mark.asyncio
 async def test_allowlist_rejects_every_mutating_endpoint_before_http() -> None:
     calls = 0

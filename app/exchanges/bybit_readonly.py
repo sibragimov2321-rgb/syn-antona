@@ -28,7 +28,10 @@ from app.exchanges.base import LiveTradingDisabledError
 from app.exchanges.models import MarketType, OrderRequest, OrderSide, OrderType
 
 
-MAINNET_BASE_URL = "https://api.bybit.com"
+MAINNET_BASE_URL = "https://api.bytick.com"
+APPROVED_MAINNET_BASE_URLS = frozenset(
+    {"https://api.bybit.com", "https://api.bytick.com"}
+)
 RECV_WINDOW_MS = 5_000
 PRIVATE_GET_PATHS = frozenset(
     {
@@ -79,14 +82,18 @@ class BybitMainnetReadOnlyClient:
         *,
         timeout_seconds: float = 15.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        base_url: str = MAINNET_BASE_URL,
     ) -> None:
         if not api_key or not api_secret:
             raise ValueError("BYBIT_API_KEY and BYBIT_API_SECRET must be set")
+        normalized_base_url = base_url.rstrip("/")
+        if normalized_base_url not in APPROVED_MAINNET_BASE_URLS:
+            raise ValueError("Bybit base URL is not an approved official Mainnet endpoint")
         self._api_key = api_key
         self._api_secret = api_secret
         self._server_offset_ms = 0
         self._http = httpx.AsyncClient(
-            base_url=MAINNET_BASE_URL,
+            base_url=normalized_base_url,
             timeout=timeout_seconds,
             transport=transport,
             headers={"User-Agent": "syn-antona-readonly-preflight/1.0"},
@@ -137,6 +144,10 @@ class BybitMainnetReadOnlyClient:
             latency = Decimal(str((time.perf_counter() - started) * 1000))
             response.raise_for_status()
             payload = response.json()
+        except httpx.HTTPStatusError as error:
+            raise BybitReadError(
+                path, f"HTTP_{error.response.status_code}", "HTTPStatusError"
+            ) from error
         except (httpx.HTTPError, ValueError) as error:
             raise BybitReadError(path, "HTTP", type(error).__name__) from error
         code = payload.get("retCode")

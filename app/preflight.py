@@ -25,6 +25,7 @@ CRITICAL_TESTS = (
     "tests/test_phase4i_resilience.py",
     "tests/test_security.py",
     "tests/test_ai.py",
+    "tests/test_bybit_readonly.py",
 )
 
 
