@@ -5,6 +5,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -42,17 +43,21 @@ def main() -> None:
     parser.add_argument("--watchdog-seconds", type=int, default=30)
     arguments = parser.parse_args()
     stopping = False
+    stop_event = threading.Event()
+    process = None
 
     def request_stop(signum, frame) -> None:
         nonlocal stopping
         stopping = True
+        stop_event.set()
+        if process is not None and process.poll() is None:
+            process.terminate()
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     instance_id = os.getenv("SHADOW_INSTANCE_ID") or str(uuid.uuid4())
     child_environment = dict(os.environ, SHADOW_INSTANCE_ID=instance_id)
     restart_delay = 1
-    process = None
     while not stopping:
         command = [
             sys.executable,
@@ -75,7 +80,7 @@ def main() -> None:
         )
         restart_reason = None
         while not stopping and process.poll() is None:
-            time.sleep(arguments.watchdog_seconds)
+            stop_event.wait(arguments.watchdog_seconds)
             if time.monotonic() - started < settings.shadow_heartbeat_max_age_seconds:
                 continue
             try:
@@ -111,7 +116,7 @@ def main() -> None:
             "collector_process_restart",
             {"reason": restart_reason, "delay_seconds": restart_delay},
         )
-        time.sleep(restart_delay)
+        stop_event.wait(restart_delay)
         restart_delay = min(60, restart_delay * 2)
     if process and process.poll() is None:
         _stop(process)
