@@ -24,6 +24,7 @@ from app.db import (
     ShadowCollectorStateRecord,
     ShadowDecisionRecord,
     ShadowExchangeHealthRecord,
+    SignalWaitRuntimeRecord,
 )
 from app.exchanges.bybit_readonly import BybitMainnetReadOnlyClient
 from app.shadow.engine import PROTOCOL_ID
@@ -130,6 +131,7 @@ class _PersistedWaitFacts:
     counts: dict[str, int]
     collector: ShadowCollectorStateRecord | None
     bybit_health: ShadowExchangeHealthRecord | None
+    account_runtime: SignalWaitRuntimeRecord | None
 
 
 class SignalWaitStatusRepository:
@@ -197,7 +199,16 @@ class SignalWaitStatusRepository:
                     ShadowExchangeHealthRecord.exchange == EXCHANGE,
                 )
             )
-            for record in (latest_candle, latest_decision, collector, bybit_health):
+            account_runtime = session.get(
+                SignalWaitRuntimeRecord, CONTROLLED_LIVE_V1.name
+            )
+            for record in (
+                latest_candle,
+                latest_decision,
+                collector,
+                bybit_health,
+                account_runtime,
+            ):
                 if record is not None:
                     session.expunge(record)
         return _PersistedWaitFacts(
@@ -209,7 +220,39 @@ class SignalWaitStatusRepository:
             counts,
             collector,
             bybit_health,
+            account_runtime,
         )
+
+    def record_account_success(
+        self, account: BybitWaitAccount, checked_at: datetime
+    ) -> None:
+        with self.session_factory.begin() as session:
+            record = session.get(SignalWaitRuntimeRecord, CONTROLLED_LIVE_V1.name)
+            if record is None:
+                record = SignalWaitRuntimeRecord(
+                    profile_name=CONTROLLED_LIVE_V1.name,
+                    updated_at=checked_at,
+                )
+                session.add(record)
+            record.equity = account.equity
+            record.open_positions = account.open_positions
+            record.open_orders = account.open_orders
+            record.account_checked_at = checked_at
+            record.account_error = None
+            record.updated_at = checked_at
+
+    def record_account_error(self, error: Exception, checked_at: datetime) -> None:
+        with self.session_factory.begin() as session:
+            record = session.get(SignalWaitRuntimeRecord, CONTROLLED_LIVE_V1.name)
+            if record is None:
+                record = SignalWaitRuntimeRecord(
+                    profile_name=CONTROLLED_LIVE_V1.name,
+                    updated_at=checked_at,
+                )
+                session.add(record)
+            record.account_checked_at = checked_at
+            record.account_error = f"{type(error).__name__}: {error}"[:500]
+            record.updated_at = checked_at
 
 
 class SignalWaitStatusService:
@@ -220,11 +263,13 @@ class SignalWaitStatusService:
         *,
         heartbeat_max_age_seconds: int = 300,
         candle_stale_seconds: int = 7500,
+        account_max_age_seconds: int = 300,
     ) -> None:
         self.repository = repository
         self.account_reader = account_reader
         self.heartbeat_max_age_seconds = heartbeat_max_age_seconds
         self.candle_stale_seconds = candle_stale_seconds
+        self.account_max_age_seconds = account_max_age_seconds
 
     async def snapshot(self, now: datetime | None = None) -> SignalWaitSnapshot:
         current = now or datetime.now(UTC)
@@ -252,14 +297,38 @@ class SignalWaitStatusService:
         ) or last_candle is None
 
         account = None
-        account_error = False
+        runtime_checked = (
+            _utc(facts.account_runtime.account_checked_at)
+            if facts.account_runtime
+            else None
+        )
+        runtime_fresh = bool(
+            runtime_checked
+            and (current - runtime_checked).total_seconds() <= self.account_max_age_seconds
+        )
+        if (
+            facts.account_runtime
+            and facts.account_runtime.equity is not None
+            and facts.account_runtime.open_positions is not None
+            and facts.account_runtime.open_orders is not None
+        ):
+            account = BybitWaitAccount(
+                Decimal(facts.account_runtime.equity),
+                int(facts.account_runtime.open_positions),
+                int(facts.account_runtime.open_orders),
+            )
+        account_error = bool(
+            not runtime_fresh
+            or (facts.account_runtime and facts.account_runtime.account_error)
+        )
         if self.account_reader is not None:
             try:
                 account = await self.account_reader.read()
-            except Exception:
+                self.repository.record_account_success(account, current)
+                account_error = False
+            except Exception as error:
+                self.repository.record_account_error(error, current)
                 account_error = True
-        else:
-            account_error = True
 
         persisted_health = facts.bybit_health.status if facts.bybit_health else "OFFLINE"
         if persisted_health == "OFFLINE":

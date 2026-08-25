@@ -252,9 +252,10 @@ MANUAL_FIRST_ORDER_APPROVED=false
 
 The admin-only Shadow section shows a read-only `ОЖИДАНИЕ СИГНАЛА` block for SOLUSDT. Its
 candle, analysis time, decision counters and WAIT reason come only from persisted PostgreSQL
-records created after the Phase 5E cursor. Its equity/position/order values use the strict
-GET-only Bybit client. `Проверить сигнал сейчас` only refreshes those reads and rejects any candle
-whose close time is in the future; it cannot invoke the strategy or create a decision.
+records created after the Phase 5E cursor. Shadow refreshes equity/position/order values through
+the strict GET-only Bybit client and stores the snapshot in PostgreSQL; Telegram receives no Bybit
+credential. `Проверить сигнал сейчас` refreshes the persisted status and rejects any candle whose
+close time is in the future; it cannot invoke the strategy or create a decision.
 
 `Почему WAIT?` prints only `risk_reason`/`context.reason` already stored by the frozen pipeline.
 Normal WAIT decisions never generate Telegram notifications. Existing transition alerts remain

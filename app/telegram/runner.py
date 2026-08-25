@@ -13,7 +13,6 @@ from app.market.synthetic import SyntheticDemoData
 from app.shadow.engine import PROTOCOL_ID
 from app.shadow.repository import ShadowRepository, shadow_metrics
 from app.shadow.signal_wait_status import (
-    BybitSignalWaitReader,
     SignalWaitStatusRepository,
     SignalWaitStatusService,
     format_signal_wait_status,
@@ -127,13 +126,9 @@ def signal_wait_keyboard() -> InlineKeyboardMarkup:
 
 async def current_signal_wait_status():
     settings = get_settings()
-    try:
-        reader = BybitSignalWaitReader.from_environment()
-    except (ValueError, RuntimeError):
-        reader = None
     service = SignalWaitStatusService(
         SignalWaitStatusRepository(SessionLocal),
-        reader,
+        None,
         heartbeat_max_age_seconds=settings.shadow_heartbeat_max_age_seconds,
     )
     try:

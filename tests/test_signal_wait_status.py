@@ -239,6 +239,27 @@ async def test_stale_data_stopped_collector_and_failed_private_get_are_fail_clos
 
 
 @pytest.mark.asyncio
+async def test_credential_free_telegram_reads_fresh_account_snapshot_from_postgres():
+    now = datetime(2026, 8, 26, 12, 3, tzinfo=UTC)
+    sessions = _sessions()
+    _seed(sessions, now)
+    repository = SignalWaitStatusRepository(sessions)
+    shadow_service = SignalWaitStatusService(repository, Reader())
+    await shadow_service.snapshot(now)
+    await shadow_service.close()
+
+    # Telegram has no Bybit key and no account reader. It receives only the
+    # recent GET-only snapshot written by Shadow.
+    telegram_snapshot = await SignalWaitStatusService(repository, None).snapshot(
+        now + timedelta(seconds=30)
+    )
+    assert telegram_snapshot.equity == Decimal("50.01")
+    assert telegram_snapshot.open_positions == 0
+    assert telegram_snapshot.open_orders == 0
+    assert telegram_snapshot.bybit_connection == "HEALTHY"
+
+
+@pytest.mark.asyncio
 async def test_unclosed_candle_is_ignored_by_check_now():
     now = datetime(2026, 8, 26, 12, 3, tzinfo=UTC)
     sessions = _sessions()

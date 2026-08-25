@@ -19,6 +19,11 @@ from app.shadow.notifier import ShadowNotifier
 from app.shadow.protocol import verify_existing_lock
 from app.shadow.recovery import recover_after_downtime
 from app.shadow.repository import ShadowRepository
+from app.shadow.signal_wait_status import (
+    BybitSignalWaitReader,
+    SignalWaitStatusRepository,
+    SignalWaitStatusService,
+)
 from app.shadow.status import snapshot_metrics
 from app.shadow.warmup_bundle import load_warmup_bundle
 from app.strategy_lab.phase4g import EXCHANGES
@@ -171,6 +176,7 @@ async def run(arguments) -> None:
     proposal_gateway = None
     proposal_repository = FirstLiveProposalRepository(SessionLocal)
     proposal_coordinator = None
+    signal_wait_service = None
     try:
         repository.ping()
         if not arguments.protocol_lock.exists():
@@ -203,6 +209,11 @@ async def run(arguments) -> None:
                 proposal_repository,
                 proposal_gateway,
                 settings.admin_telegram_ids,
+            )
+            signal_wait_service = SignalWaitStatusService(
+                SignalWaitStatusRepository(SessionLocal),
+                BybitSignalWaitReader.from_environment(),
+                heartbeat_max_age_seconds=settings.shadow_heartbeat_max_age_seconds,
             )
         orphan_decisions = repository.repair_orphan_decisions(
             PROTOCOL_ID, protocol["strategy_config_hash"]
@@ -292,6 +303,8 @@ async def run(arguments) -> None:
         cycles = 0
         while True:
             result = await engine.cycle()
+            if signal_wait_service is not None:
+                await signal_wait_service.snapshot()
             if proposal_coordinator is not None:
                 proposal_result = await proposal_coordinator.cycle()
                 if (
@@ -446,6 +459,8 @@ async def run(arguments) -> None:
         await notifier.close()
         if proposal_gateway is not None:
             await proposal_gateway.close()
+        if signal_wait_service is not None:
+            await signal_wait_service.close()
         await market.close()
 
 

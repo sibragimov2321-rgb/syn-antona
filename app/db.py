@@ -196,6 +196,24 @@ class FirstLiveProposalStateRecord(Base):
     )
 
 
+class SignalWaitRuntimeRecord(Base):
+    """Latest GET-only Bybit account snapshot for the credential-free Telegram service."""
+
+    __tablename__ = "signal_wait_runtime"
+
+    profile_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    equity: Mapped[Decimal | None] = mapped_column(Numeric(24, 10), nullable=True)
+    open_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    open_orders: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    account_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    account_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
 class HistoricalCandleRecord(Base):
     __tablename__ = "historical_candles"
     __table_args__ = (
