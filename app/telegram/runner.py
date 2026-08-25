@@ -6,6 +6,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.core.config import get_settings
+from app.db import SessionLocal
 from app.demo import DemoAutotrader
 from app.domain.models import BotState
 from app.market.synthetic import SyntheticDemoData
@@ -13,10 +14,19 @@ from app.shadow.engine import PROTOCOL_ID
 from app.shadow.repository import ShadowRepository, shadow_metrics
 from app.shadow.status import telegram_system_status
 from app.statistics import calculate_statistics
+from app.trading.controlled_live import ControlledLiveRepository
 
 router = Router()
 demo = DemoAutotrader()
 demo_task: asyncio.Task | None = None
+
+
+def is_admin_telegram_user(user_id: int, admin_ids: set[int]) -> bool:
+    return user_id in admin_ids
+
+
+def activate_persistent_execution_kill_switch() -> None:
+    ControlledLiveRepository(SessionLocal).activate_kill_switch()
 
 
 async def run_demo_notifications(bot: Bot, chat_id: int) -> None:
@@ -101,10 +111,18 @@ async def start(message: Message) -> None:
 
 @router.callback_query()
 async def actions(callback: CallbackQuery) -> None:
+    emergency_actions = {"bot:emergency", "emergency:keep", "emergency:close"}
+    if callback.data in emergency_actions and not is_admin_telegram_user(
+        callback.from_user.id, get_settings().admin_telegram_ids
+    ):
+        await callback.answer("Доступ разрешён только администратору.", show_alert=True)
+        return
     if callback.data == "bot:emergency":
+        activate_persistent_execution_kill_switch()
         demo.emergency_stop()
         await callback.message.answer(
-            "🚨 АВАРИЙНАЯ ОСТАНОВКА: новые DEMO-входы запрещены. Выберите действие с позициями.",
+            "🚨 АВАРИЙНАЯ ОСТАНОВКА: новые DEMO и Mainnet-входы запрещены. "
+            "Выберите действие с DEMO-позициями.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="Оставить позиции", callback_data="emergency:keep"),
                 InlineKeyboardButton(text="Закрыть все DEMO-позиции", callback_data="emergency:close"),

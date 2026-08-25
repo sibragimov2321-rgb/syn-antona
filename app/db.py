@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -91,6 +92,59 @@ class ExecutionOrderRecord(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class ControlledLiveStateRecord(Base):
+    """Persistent fail-closed state for the immutable controlled-live profile."""
+
+    __tablename__ = "controlled_live_state"
+
+    profile_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    profile_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    kill_switch_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    first_order_in_progress: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    first_order_executed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class ControlledLiveProposalRecord(Base):
+    """Admin-reviewed first-order preview; it contains no exchange credential."""
+
+    __tablename__ = "controlled_live_proposals"
+
+    proposal_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    proposal_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    profile_name: Mapped[str] = mapped_column(String(64), index=True)
+    profile_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(48), nullable=False)
+    preview_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PREVIEWED")
+    client_order_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    position_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)

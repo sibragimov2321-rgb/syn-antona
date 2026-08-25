@@ -169,6 +169,32 @@ days, omit `--preview` to create the immutable final report.
 
 `LIVE_TRADING_ENABLED=false` is mandatory. Real orders and real money remain unavailable.
 
+## Phase 5A controlled Mainnet preparation
+
+The immutable profile [CONTROLLED_LIVE_V1](config/controlled_live_v1.json) is preparation for one
+manually reviewed BTCUSDT USDT-perpetual infrastructure-validation order. Its canonical SHA-256 is
+`f9aef880cc9ac20b80d6db01adf8c0dab6e6085d84fd872889611013b1e69079`. It fixes 1x leverage, one
+position, four trades/day maximum, 0.5% risk, 2% daily loss, two consecutive losses, a 60-minute
+cooldown, minimum 1:2 R/R, $10 position notional, a $5 first-order cap and no trailing stop.
+
+Submission requires all three environment gates plus an exact persistent admin-approved proposal:
+
+```text
+LIVE_TRADING_ENABLED=false
+CONTROLLED_LIVE_ENABLED=false
+MANUAL_FIRST_ORDER_APPROVED=false
+```
+
+The Phase 5A repository stores the preview, profile hash, manual approval, durable client order ID,
+exchange order/position identifiers and fail-closed first-order state. A timeout becomes `UNKNOWN`
+and cannot be retried automatically. After a confirmed fill the coordinator requires exchange-native
+full-position market SL/TP protection; a protection failure invokes the reduce-only emergency-close
+path. Strategy and AI sources are rejected for the first order. Telegram emergency actions require
+membership in `ADMIN_TELEGRAM_IDS`.
+
+Phase 5A does not include or instantiate a production order HTTP gateway. All execution-path tests
+use deterministic fakes. The three gates must remain false until a separate explicit authorization.
+
 ## Phase 4G frozen cross-confirmation
 
 Phase 4G independently validates the exact Phase 4F `VOLATILITY_EXPANSION:1h:v1` configuration.

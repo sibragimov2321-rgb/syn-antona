@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     encryption_key: str | None = None
     admin_telegram_ids: set[int] = Field(default_factory=set)
     live_trading_enabled: bool = False
+    controlled_live_enabled: bool = False
+    manual_first_order_approved: bool = False
     ai_provider: str = "mock"
     ai_model: str = "mock-v1"
     ai_api_key: str | None = None
@@ -29,9 +31,13 @@ class Settings(BaseSettings):
     shadow_api_timeout_ms: int = 15_000
 
     def assert_safe_runtime(self) -> None:
-        if self.live_trading_enabled:
+        if self.live_trading_enabled and not self.controlled_live_enabled:
             raise RuntimeError(
-                "Live trading is not implemented in this phase. Set LIVE_TRADING_ENABLED=false."
+                "CONTROLLED_LIVE_ENABLED must also be true before live execution can arm."
+            )
+        if self.live_trading_enabled and not self.manual_first_order_approved:
+            raise RuntimeError(
+                "MANUAL_FIRST_ORDER_APPROVED must also be true before live execution can arm."
             )
 
 

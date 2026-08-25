@@ -26,6 +26,7 @@ CRITICAL_TESTS = (
     "tests/test_security.py",
     "tests/test_ai.py",
     "tests/test_bybit_readonly.py",
+    "tests/test_controlled_live.py",
 )
 
 
@@ -39,6 +40,8 @@ def main() -> None:
     safety = {
         "checked_at": datetime.now(UTC).isoformat(),
         "live_trading_enabled": settings.live_trading_enabled,
+        "controlled_live_enabled": settings.controlled_live_enabled,
+        "manual_first_order_approved": settings.manual_first_order_approved,
         "real_orders_possible_from_deployed_services": False,
         "private_bybit_credentials_required_for_this_gate": False,
         "critical_test_files": len(CRITICAL_TESTS),

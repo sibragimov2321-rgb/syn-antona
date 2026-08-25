@@ -1,0 +1,18 @@
+{
+  "profile": "CONTROLLED_LIVE_V1",
+  "exchange": "bybit",
+  "symbol": "BTC/USDT",
+  "exchange_symbol": "BTCUSDT",
+  "market_type": "USDT_PERPETUAL",
+  "leverage": "1",
+  "max_positions": 1,
+  "max_trades_per_day": 4,
+  "risk_per_trade_pct": "0.005",
+  "daily_loss_limit_pct": "0.02",
+  "max_consecutive_losses": 2,
+  "cooldown_minutes": 60,
+  "minimum_risk_reward": "2",
+  "max_position_notional_usdt": "10",
+  "first_execution_notional_cap_usdt": "5",
+  "trailing_stop": false
+}
