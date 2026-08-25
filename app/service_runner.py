@@ -21,6 +21,8 @@ def command_for_role(role: str) -> list[str]:
         ]
     if role == "telegram":
         return [sys.executable, "-m", "app.telegram.runner"]
+    if role == "bybit_preflight":
+        return [sys.executable, "-m", "app.exchanges.bybit_readonly_worker"]
     raise RuntimeError(f"Unknown SERVICE_ROLE: {role}")
 
 
