@@ -94,6 +94,54 @@ async def test_signed_request_is_get_and_report_response_excludes_key_fields() -
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_signed_request_sends_same_sorted_query_that_was_signed() -> None:
+    observed_query = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_query
+        observed_query = request.url.query.decode()
+        return httpx.Response(200, json={"retCode": 0, "result": {}})
+
+    client = BybitMainnetReadOnlyClient(
+        "key", "secret", transport=httpx.MockTransport(handler)
+    )
+    try:
+        await client.private_get(
+            "/v5/position/list",
+            {"category": "linear", "settleCoin": "USDT", "limit": 200},
+        )
+        assert observed_query == "category=linear&limit=200&settleCoin=USDT"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_bybit_signature_error_never_reports_origin_string_or_key() -> None:
+    key = "do-not-leak-key"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "retCode": 10004,
+                "retMsg": f"Error sign: origin_string[timestamp{key}5000query]",
+                "result": {},
+            },
+        )
+
+    client = BybitMainnetReadOnlyClient(key, "secret", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(Exception) as raised:
+            await client.private_get("/v5/position/list", {"category": "linear"})
+        rendered = str(raised.value)
+        assert key not in rendered
+        assert "origin_string" not in rendered
+        assert "signature validation failed" in rendered
+    finally:
+        await client.close()
+
+
 def test_permission_mapping_is_exact_and_conservative() -> None:
     mapped = permission_summary(
         {

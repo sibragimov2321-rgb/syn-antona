@@ -111,8 +111,8 @@ class BybitMainnetReadOnlyClient:
 
     async def private_get(self, path: str, params: dict[str, Any] | None = None) -> ReadResult:
         self._require_allowed(path, private=True)
-        parameters = _clean_params(params or {})
-        query = urlencode(sorted(parameters.items()))
+        parameters = dict(sorted(_clean_params(params or {}).items()))
+        query = urlencode(parameters)
         timestamp_ms = int(time.time() * 1000) + self._server_offset_ms
         payload = f"{timestamp_ms}{self._api_key}{RECV_WINDOW_MS}{query}"
         signature = hmac.new(
@@ -152,7 +152,14 @@ class BybitMainnetReadOnlyClient:
             raise BybitReadError(path, "HTTP", type(error).__name__) from error
         code = payload.get("retCode")
         if code != 0:
-            raise BybitReadError(path, code, payload.get("retMsg", "Bybit rejected request"))
+            message = str(payload.get("retMsg", "Bybit rejected request"))
+            if code == 10004 or "origin_string" in message.lower():
+                message = "Bybit signature validation failed"
+            else:
+                message = message.replace(self._api_key, "***").replace(
+                    self._api_secret, "***"
+                )
+            raise BybitReadError(path, code, message)
         result = payload.get("result")
         if not isinstance(result, dict):
             raise BybitReadError(path, "SCHEMA", "result is not an object")
