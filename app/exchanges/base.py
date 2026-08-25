@@ -146,6 +146,8 @@ class ExchangeAdapter(ABC):
 
     @classmethod
     def validate_order(cls, request: OrderRequest, rules: InstrumentRules) -> OrderRequest:
+        if request.leverage <= 0:
+            raise InvalidOrderError("Leverage must be positive")
         if request.leverage > rules.maximum_leverage:
             raise InvalidOrderError("Requested leverage exceeds exchange maximum")
         quantity = cls.normalize_quantity(request.quantity, rules)

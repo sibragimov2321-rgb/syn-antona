@@ -225,7 +225,8 @@ class CcxtTransport:
         return numeric if numeric > 0 else Decimal("0.00000001")
 
     def _order(self, value: dict, account_id: str = "default") -> ExchangeOrder:
-        return ExchangeOrder(self.exchange, account_id, str(value.get("id")), self._internal_symbol(value.get("symbol", "")), str(value.get("status", "unknown")).upper(), _decimal(value.get("amount")), _decimal(value.get("filled")), _decimal(value.get("average")) if value.get("average") is not None else None)
+        client_order_id = value.get("clientOrderId") or (value.get("info") or {}).get("orderLinkId")
+        return ExchangeOrder(self.exchange, account_id, str(value.get("id")), self._internal_symbol(value.get("symbol", "")), str(value.get("status", "unknown")).upper(), _decimal(value.get("amount")), _decimal(value.get("filled")), _decimal(value.get("average")) if value.get("average") is not None else None, str(client_order_id) if client_order_id else None)
 
     def _position(self, value: dict) -> ExchangePosition:
         return ExchangePosition(self.exchange, str(value.get("account") or "default"), str(value.get("id") or value.get("symbol")), self._internal_symbol(value.get("symbol", "")), str(value.get("side", "")).upper(), _decimal(value.get("contracts")), _decimal(value.get("entryPrice")), _decimal(value.get("leverage"), "1"), _decimal(value.get("unrealizedPnl")), str((value.get("info") or {}).get("strategyVersion", "unknown")))

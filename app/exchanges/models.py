@@ -145,6 +145,7 @@ class ExchangeOrder:
     quantity: Decimal
     filled_quantity: Decimal = Decimal()
     average_price: Decimal | None = None
+    client_order_id: str | None = None
 
 
 @dataclass(frozen=True)

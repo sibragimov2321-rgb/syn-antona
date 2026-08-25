@@ -67,6 +67,36 @@ class TradeEvent(Base):
     )
 
 
+class ExecutionOrderRecord(Base):
+    """Durable idempotency ledger for every private exchange order attempt."""
+
+    __tablename__ = "execution_orders"
+    __table_args__ = (
+        UniqueConstraint(
+            "exchange", "account_id", "client_order_id", name="uq_execution_client_order"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(32), index=True)
+    account_id: Mapped[str] = mapped_column(String(64), index=True)
+    client_order_id: Mapped[str] = mapped_column(String(128), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    side: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(24, 10))
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
+    exchange_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    exchange_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
 class HistoricalCandleRecord(Base):
     __tablename__ = "historical_candles"
     __table_args__ = (

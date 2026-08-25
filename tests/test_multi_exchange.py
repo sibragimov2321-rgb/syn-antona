@@ -174,7 +174,12 @@ async def test_single_trading_engine_uses_bound_adapter_risk_and_duplicate_prote
     adapter = BybitAdapter(FakeTransport())
     router.register("account-a", adapter)
     market = await router.get_context("bybit", "account-a", "BTC/USDT")
-    engine = MultiExchangeTradingEngine(router, ExchangeHealthMonitor(), PortfolioManager())
+    engine = MultiExchangeTradingEngine(
+        router,
+        ExchangeHealthMonitor(),
+        PortfolioManager(),
+        require_persistent_store=False,
+    )
     request = OrderRequest("account-a", "BTC/USDT", MarketType.PERPETUAL, OrderSide.BUY, OrderType.MARKET, Decimal("0.1"), leverage=Decimal("1"), client_order_id="signal-1")
     risk = ExecutionRiskContext({("bybit", "account-a"): Decimal("1000")}, {})
     order = await engine.execute(market, request, Decimal("95"), risk)

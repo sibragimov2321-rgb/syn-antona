@@ -10,6 +10,9 @@ class ExchangeRiskLimits:
     max_exposure_pct: Decimal = Decimal("0.25")
     max_positions: int = 2
     max_daily_loss_pct: Decimal = Decimal("0.02")
+    max_position_notional: Decimal = Decimal("500")
+    max_risk_per_trade_pct: Decimal = Decimal("0.005")
+    max_consecutive_losses: int = 3
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,14 @@ class GlobalPortfolioRiskManager:
         total_equity = sum(equity_by_account.values(), Decimal())
         if account_equity <= 0 or total_equity <= 0:
             return PortfolioRiskDecision(False, "Equity must be positive")
+        if proposal.notional <= 0 or proposal.open_risk <= 0:
+            return PortfolioRiskDecision(False, "Position notional and risk must be positive")
+        if proposal.leverage <= 0:
+            return PortfolioRiskDecision(False, "Leverage must be positive")
+        if proposal.notional > exchange_limits.max_position_notional:
+            return PortfolioRiskDecision(False, "Hard position notional limit exceeded")
+        if proposal.open_risk > account_equity * exchange_limits.max_risk_per_trade_pct:
+            return PortfolioRiskDecision(False, "Hard per-trade risk limit exceeded")
         account_positions = [position for position in positions if (position.exchange, position.account_id) == account_key]
         account_exposure = sum((position.notional for position in account_positions), Decimal()) + proposal.notional
         if len(account_positions) >= exchange_limits.max_positions:
