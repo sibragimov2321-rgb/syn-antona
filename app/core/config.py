@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     live_trading_enabled: bool = False
     controlled_live_enabled: bool = False
     manual_first_order_approved: bool = False
+    dry_run: bool = True
     ai_provider: str = "mock"
     ai_model: str = "mock-v1"
     ai_api_key: str | None = None

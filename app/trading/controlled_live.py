@@ -25,6 +25,7 @@ from app.db import (
     ExecutionOrderRecord,
 )
 from app.exchanges.models import InstrumentRules, OrderSide
+from app.trading.execution_store import OrderRejected
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1.json"
@@ -219,7 +220,10 @@ class ManualExecutionPreview:
 
     @property
     def client_order_id(self) -> str:
-        return f"clv1-{self.proposal_id}"
+        # Bybit V5 orderLinkId is limited to 36 characters. Keep the ID
+        # deterministic without exposing or truncating the proposal itself.
+        digest = hashlib.sha256(self.proposal_id.encode()).hexdigest()
+        return f"clv1-{digest[:31]}"
 
     @property
     def proposal_hash(self) -> str:
@@ -511,6 +515,15 @@ class ControlledLiveRepository:
             error_code=type(error).__name__,
         )
 
+    def mark_rejected(self, preview: ManualExecutionPreview, error: Exception) -> None:
+        self._update_execution(
+            preview,
+            proposal_status="REJECTED",
+            ledger_status="REJECTED",
+            error_code=type(error).__name__,
+            release_first_order=True,
+        )
+
     def activate_kill_switch(self) -> None:
         with self.session_factory() as session:
             state = session.get(ControlledLiveStateRecord, self.profile.name)
@@ -545,6 +558,7 @@ class ControlledLiveRepository:
         exchange_status: str | None = None,
         error_code: str | None = None,
         finish_first_order: bool = False,
+        release_first_order: bool = False,
     ) -> None:
         now = datetime.now(UTC)
         with self.session_factory() as session:
@@ -572,6 +586,9 @@ class ControlledLiveRepository:
             if finish_first_order:
                 state.first_order_in_progress = False
                 state.first_order_executed = True
+                state.updated_at = now
+            elif release_first_order:
+                state.first_order_in_progress = False
                 state.updated_at = now
             session.commit()
 
@@ -696,9 +713,19 @@ class ManualExecutionService:
             raise ControlledLiveBlocked("Strategy and AI cannot submit the first Mainnet order")
         current = await self.gateway.current_instrument_state(self.instrument.symbol)
         self._validate_current_instrument(preview, current)
+        if getattr(self.gateway, "dry_run", False):
+            prepare = getattr(self.gateway, "dry_run_market_request", None)
+            if prepare is not None:
+                await prepare(preview, preview.client_order_id)
+            raise ControlledLiveBlocked(
+                "DRY_RUN signed and validated the request; mutating HTTP was not sent"
+            )
         self.repository.claim_submission(preview, account_id)
         try:
             fill = await self.gateway.submit_market(preview, preview.client_order_id)
+        except OrderRejected as error:
+            self.repository.mark_rejected(preview, error)
+            raise
         except Exception as error:
             self.repository.mark_unknown(preview, error)
             raise ReconciliationRequired(

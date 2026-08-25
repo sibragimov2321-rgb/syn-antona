@@ -26,6 +26,10 @@ class OrderOutcomeUnknown(RuntimeError):
     """The venue may have accepted the order; automatic retry is forbidden."""
 
 
+class OrderRejected(RuntimeError):
+    """The venue explicitly rejected the request; its outcome is known."""
+
+
 @dataclass(frozen=True)
 class OrderAttempt:
     exchange: str

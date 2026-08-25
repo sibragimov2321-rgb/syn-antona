@@ -195,6 +195,22 @@ membership in `ADMIN_TELEGRAM_IDS`.
 Phase 5A does not include or instantiate a production order HTTP gateway. All execution-path tests
 use deterministic fakes. The three gates must remain false until a separate explicit authorization.
 
+## Phase 5C production Bybit order gateway
+
+The production boundary is implemented in `app.exchanges.bybit_v5_gateway`. It is restricted to
+`SOLUSDT` Linear Perpetual, `0.1 SOL`, 1x leverage, one position and a $10 notional cap. Before
+every private POST it revalidates the three arming gates, an unexpired persistent admin approval,
+the kill switch, the immutable hashes, current instrument limits and quote, positions, daily loss,
+and the key permissions. The V5 mutation allowlist contains only create/cancel order, set leverage,
+and full-position native trading-stop endpoints.
+
+`DRY_RUN=true` is the default. In this mode the exact compact JSON payload is signed and locally
+validated, but no mutating HTTP request is sent. A create timeout is persisted as `UNKNOWN`; the
+same deterministic `orderLinkId` cannot be resubmitted until read-only order/history/execution
+reconciliation has resolved it. Risk-reducing cancellation and close are the only operations that
+remain eligible after an emergency stop. No production service arms or calls this gateway while the
+three execution gates remain false.
+
 ### Phase 5B first-instrument selection
 
 `CONTROLLED_LIVE_V1_FIRST_SYMBOL=SOLUSDT` is frozen separately from the original Phase 5A profile
