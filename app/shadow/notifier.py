@@ -5,6 +5,7 @@ from html import escape
 import json
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,38 @@ class ShadowNotifier:
             f"Максимальная просадка: ${metrics.get('max_drawdown', 0)}\n\n"
             "Стратегия остаётся зафиксированной; отчёт не изменяет её параметры."
         )
+
+    async def controlled_proposal(
+        self, text: str, proposal_id: str, admin_id: int
+    ) -> bool:
+        """Deliver the one immutable Phase 5E preview to its owning admin."""
+        if not self.bot or admin_id not in self.chat_ids:
+            return False
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Подтвердить первую сделку",
+                        callback_data=f"phase5e:approve:{proposal_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отменить",
+                        callback_data=f"phase5e:cancel:{proposal_id}",
+                    ),
+                ]
+            ]
+        )
+        try:
+            await self.bot.send_message(
+                admin_id, text, parse_mode="HTML", reply_markup=keyboard
+            )
+        except Exception:
+            logger.exception(
+                "controlled_proposal_telegram_delivery_failed",
+                extra={"chat_id": admin_id, "proposal_id": proposal_id},
+            )
+            return False
+        return True
 
     async def _send(self, text: str) -> bool:
         if not self.bot:

@@ -34,6 +34,7 @@ from app.trading.controlled_live import (
     CONTROLLED_LIVE_V1,
     CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
     ControlledLiveBlocked,
+    ControlledProposalReadSnapshot,
     CurrentInstrumentState,
     LiveFill,
     LiveGatewaySnapshot,
@@ -155,13 +156,16 @@ class BybitV5Http:
 
     async def private_get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         clean = _clean(params)
-        query = urlencode(sorted(clean.items()))
+        # Bybit verifies the signature against the byte-exact query string. Use
+        # the same canonical ordering for signing and for HTTP serialization.
+        ordered = dict(sorted(clean.items()))
+        query = urlencode(ordered)
         timestamp = int(time.time() * 1000)
         signature = self._sign(f"{timestamp}{self._api_key}{RECV_WINDOW_MS}{query}")
         return await self._request(
             "GET",
             path,
-            params=clean,
+            params=ordered,
             headers=self._headers(timestamp, signature),
         )
 
@@ -421,6 +425,72 @@ class BybitV5OrderGateway:
             _decimal(lot.get("minOrderQty")),
             _decimal(lot.get("qtyStep")),
             _decimal(lot.get("minNotionalValue")),
+        )
+
+    async def controlled_proposal_snapshot(
+        self, symbol: str = ALLOWED_SYMBOL
+    ) -> ControlledProposalReadSnapshot:
+        """Collect all Phase 5E facts through GET endpoints only."""
+        self._require_symbol(symbol)
+        instruments, tickers, wallet, positions, orders, fills = await asyncio.gather(
+            self._http.public_get(
+                "/v5/market/instruments-info",
+                {"category": "linear", "symbol": symbol},
+            ),
+            self._http.public_get(
+                "/v5/market/tickers", {"category": "linear", "symbol": symbol}
+            ),
+            self._http.private_get(
+                "/v5/account/wallet-balance",
+                {"accountType": "UNIFIED", "coin": "USDT"},
+            ),
+            self._http.private_get(
+                "/v5/position/list", {"category": "linear", "symbol": symbol}
+            ),
+            self._http.private_get(
+                "/v5/order/realtime",
+                {"category": "linear", "symbol": symbol, "openOnly": 0, "limit": 50},
+            ),
+            self._http.private_get(
+                "/v5/execution/list", {"category": "linear", "symbol": symbol, "limit": 1}
+            ),
+        )
+        instrument = (instruments.get("list") or [None])[0]
+        ticker = (tickers.get("list") or [None])[0]
+        account = (wallet.get("list") or [None])[0]
+        if not instrument or not ticker or not account:
+            raise BybitGatewayError("Incomplete read-only SOLUSDT/account snapshot")
+        coins = account.get("coin") or []
+        usdt = next((item for item in coins if item.get("coin") == "USDT"), {})
+        lot = instrument.get("lotSizeFilter") or {}
+        price_filter = instrument.get("priceFilter") or {}
+        bid = _decimal(ticker.get("bid1Price"))
+        ask = _decimal(ticker.get("ask1Price"))
+        if bid <= 0 or ask <= 0 or ask < bid:
+            raise BybitGatewayError("Fresh SOLUSDT bid/ask is invalid")
+        return ControlledProposalReadSnapshot(
+            symbol=symbol,
+            contract_type=str(instrument.get("contractType") or ""),
+            status=str(instrument.get("status") or ""),
+            bid_price=bid,
+            ask_price=ask,
+            tick_size=_decimal(price_filter.get("tickSize")),
+            minimum_quantity=_decimal(lot.get("minOrderQty")),
+            quantity_step=_decimal(lot.get("qtyStep")),
+            minimum_notional=_decimal(lot.get("minNotionalValue")),
+            wallet_balance=_decimal(usdt.get("walletBalance")),
+            equity=_decimal(account.get("totalEquity")),
+            available_balance=_decimal(account.get("totalAvailableBalance")),
+            open_positions=sum(
+                _decimal(item.get("size")) > 0 for item in positions.get("list") or []
+            ),
+            open_order_ids=frozenset(
+                str(item.get("orderId"))
+                for item in orders.get("list") or []
+                if item.get("orderId")
+            ),
+            fills_read=isinstance(fills.get("list"), list),
+            fetched_at=datetime.now(UTC),
         )
 
     async def dry_run_market_request(

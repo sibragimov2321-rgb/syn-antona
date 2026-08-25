@@ -442,6 +442,20 @@ class ControlledLiveRepository:
             record.updated_at = datetime.now(UTC)
             session.commit()
 
+    def cancel(self, proposal_id: str, admin_id: int) -> None:
+        with self.session_factory() as session:
+            record = session.get(ControlledLiveProposalRecord, proposal_id)
+            if record is None or record.admin_telegram_id != admin_id:
+                raise ControlledLiveBlocked("Proposal is missing or belongs to another admin")
+            self._verify_hash(record.profile_hash)
+            self._verify_selection(self.instrument.symbol, record.selection_hash)
+            if record.status not in {"PREVIEWED", "APPROVED"}:
+                raise ControlledLiveBlocked("Proposal can no longer be cancelled")
+            record.status = "CANCELLED"
+            record.completed_at = datetime.now(UTC)
+            record.updated_at = datetime.now(UTC)
+            session.commit()
+
     def claim_submission(self, preview: ManualExecutionPreview, account_id: str) -> None:
         now = datetime.now(UTC)
         with self.session_factory() as session:
@@ -635,6 +649,28 @@ class CurrentInstrumentState:
     minimum_quantity: Decimal
     quantity_step: Decimal
     minimum_notional: Decimal
+
+
+@dataclass(frozen=True)
+class ControlledProposalReadSnapshot:
+    """Read-only exchange facts used to construct (never submit) Phase 5E."""
+
+    symbol: str
+    contract_type: str
+    status: str
+    bid_price: Decimal
+    ask_price: Decimal
+    tick_size: Decimal
+    minimum_quantity: Decimal
+    quantity_step: Decimal
+    minimum_notional: Decimal
+    wallet_balance: Decimal
+    equity: Decimal
+    available_balance: Decimal
+    open_positions: int
+    open_order_ids: frozenset[str]
+    fills_read: bool
+    fetched_at: datetime
 
 
 class ControlledLiveGateway(Protocol):

@@ -154,6 +154,48 @@ class ControlledLiveProposalRecord(Base):
     )
 
 
+class FirstLiveProposalStateRecord(Base):
+    """Durable Phase 5E cursor and one-shot proposal link.
+
+    ``started_at`` is deliberately persisted before any signal is considered.  It
+    prevents a deployment or restart from turning an old shadow decision into a
+    retrospective live proposal.
+    """
+
+    __tablename__ = "first_live_proposal_state"
+
+    profile_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_scanned_candle_open: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_scanned_decision_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    source_decision_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True
+    )
+    proposal_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True
+    )
+    available_equity: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="WAITING_FOR_SIGNAL"
+    )
+    notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
 class HistoricalCandleRecord(Base):
     __tablename__ = "historical_candles"
     __table_args__ = (

@@ -208,8 +208,8 @@ and full-position native trading-stop endpoints.
 validated, but no mutating HTTP request is sent. A create timeout is persisted as `UNKNOWN`; the
 same deterministic `orderLinkId` cannot be resubmitted until read-only order/history/execution
 reconciliation has resolved it. Risk-reducing cancellation and close are the only operations that
-remain eligible after an emergency stop. No production service arms or calls this gateway while the
-three execution gates remain false.
+remain eligible after an emergency stop. No production service arms or calls its mutation paths
+while the three execution gates remain false.
 
 ### Phase 5B first-instrument selection
 
@@ -226,6 +226,27 @@ the coordinator must re-fetch status, ask price, minimum quantity, quantity step
 notional. It blocks if `0.1 SOL × ask` moves above `$10`, if the contract is not `Trading`, or if the
 quantity no longer matches Bybit's current rules. This check occurs before the durable submission
 claim and before any HTTP order request.
+
+## Phase 5E first controlled-live proposal
+
+The shadow worker persists a one-shot Phase 5E cursor before scanning decisions. Only a new
+`bybit / SOL/USDT` `LONG` or `SHORT` decision produced by the immutable
+`phase4g_volatility_expansion_1h_frozen_v1` hash and already approved by the deterministic Risk
+Manager can become a proposal. Old decisions, WAIT, rejected risk decisions, stale exchange state,
+an existing position/order, reconciliation mismatches, quantity/notional violations, risk above
+0.5%, or R/R below 1:2 all remain `WAITING_FOR_SIGNAL`.
+
+The proposal uses fresh Bybit Linear Perpetual bid/ask and instrument/account reads, is stored once
+in PostgreSQL, survives restart, and is delivered to the configured Telegram admin with Russian
+approve/cancel buttons. Approval only records consent. The Telegram handler has no order-gateway
+call, and the production defaults send zero real orders:
+
+```text
+DRY_RUN=true
+LIVE_TRADING_ENABLED=false
+CONTROLLED_LIVE_ENABLED=false
+MANUAL_FIRST_ORDER_APPROVED=false
+```
 
 ## Phase 4G frozen cross-confirmation
 

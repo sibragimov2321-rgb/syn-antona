@@ -15,6 +15,10 @@ from app.shadow.repository import ShadowRepository, shadow_metrics
 from app.shadow.status import telegram_system_status
 from app.statistics import calculate_statistics
 from app.trading.controlled_live import ControlledLiveRepository
+from app.trading.first_live_proposal import (
+    FROZEN_SIGNAL_SOURCE,
+    FirstLiveProposalRepository,
+)
 
 router = Router()
 demo = DemoAutotrader()
@@ -112,12 +116,44 @@ async def start(message: Message) -> None:
 @router.callback_query()
 async def actions(callback: CallbackQuery) -> None:
     emergency_actions = {"bot:emergency", "emergency:keep", "emergency:close"}
-    if callback.data in emergency_actions and not is_admin_telegram_user(
+    admin_only = callback.data in emergency_actions or bool(
+        callback.data and callback.data.startswith("phase5e:")
+    )
+    if admin_only and not is_admin_telegram_user(
         callback.from_user.id, get_settings().admin_telegram_ids
     ):
         await callback.answer("Доступ разрешён только администратору.", show_alert=True)
         return
-    if callback.data == "bot:emergency":
+    if callback.data and callback.data.startswith("phase5e:"):
+        try:
+            _, action, proposal_id = callback.data.split(":", 2)
+            controlled = ControlledLiveRepository(SessionLocal)
+            phase5e = FirstLiveProposalRepository(SessionLocal)
+            record = controlled.proposal(proposal_id)
+            if record is None or record.source != FROZEN_SIGNAL_SOURCE:
+                raise PermissionError("Предложение не найдено или не относится к Phase 5E.")
+            if record.admin_telegram_id != callback.from_user.id:
+                raise PermissionError("Предложение принадлежит другому администратору.")
+            if action == "approve":
+                # This callback deliberately records consent only. It never imports
+                # or calls the order gateway, even if configuration changes later.
+                controlled.approve(record.proposal_hash, callback.from_user.id)
+                phase5e.mark_approved_dry_run(proposal_id)
+                await callback.message.answer(
+                    "✅ Подтверждение сохранено. DRY RUN: реальный ордер не отправлен. "
+                    "Все execution gates остаются закрыты."
+                )
+            elif action == "cancel":
+                phase5e.cancel(proposal_id, callback.from_user.id)
+                await callback.message.answer(
+                    "❌ Первое controlled-live предложение отменено. Ордер не отправлен."
+                )
+            else:
+                raise PermissionError("Неизвестное действие Phase 5E.")
+        except Exception as error:
+            await callback.answer(str(error), show_alert=True)
+            return
+    elif callback.data == "bot:emergency":
         activate_persistent_execution_kill_switch()
         demo.emergency_stop()
         await callback.message.answer(

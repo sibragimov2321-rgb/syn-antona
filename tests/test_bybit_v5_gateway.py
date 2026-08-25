@@ -118,7 +118,17 @@ class MockBybitVenue:
                 }
             )
         if path == "/v5/market/tickers":
-            return _ok({"list": [{"symbol": "SOLUSDT", "ask1Price": "90"}]})
+            return _ok(
+                {
+                    "list": [
+                        {
+                            "symbol": "SOLUSDT",
+                            "bid1Price": "89.99",
+                            "ask1Price": "90",
+                        }
+                    ]
+                }
+            )
         if path in {"/v5/order/realtime", "/v5/order/history"}:
             if self.pending_order and "orderId" not in query and "orderLinkId" not in query:
                 return _ok(
@@ -176,7 +186,17 @@ class MockBybitVenue:
                 }
             )
         if path == "/v5/account/wallet-balance":
-            return _ok({"list": [{"totalEquity": "50", "totalAvailableBalance": "50"}]})
+            return _ok(
+                {
+                    "list": [
+                        {
+                            "totalEquity": "50",
+                            "totalAvailableBalance": "50",
+                            "coin": [{"coin": "USDT", "walletBalance": "50"}],
+                        }
+                    ]
+                }
+            )
         if path == "/v5/position/list":
             return _ok(
                 {
@@ -519,3 +539,45 @@ async def test_post_signature_matches_official_v5_formula(monkeypatch):
     assert mutation.signature_valid is True
     assert "private-secret" not in repr(http)
     await http.close()
+
+
+@pytest.mark.asyncio
+async def test_private_get_signs_the_exact_query_order_sent_over_http(monkeypatch):
+    monkeypatch.setattr(gateway_module.time, "time", lambda: 1_658_385_579.423)
+
+    def handler(request):
+        query = request.url.query.decode()
+        assert query == "category=linear&limit=1&symbol=SOLUSDT"
+        plain = f"{request.headers['X-BAPI-TIMESTAMP']}public-key5000{query}"
+        expected = hmac.new(
+            b"private-secret", plain.encode(), hashlib.sha256
+        ).hexdigest()
+        assert request.headers["X-BAPI-SIGN"] == expected
+        return _ok({"list": []})
+
+    http = BybitV5Http(
+        "public-key",
+        "private-secret",
+        transport=httpx.MockTransport(handler),
+    )
+    await http.private_get(
+        "/v5/execution/list",
+        {"category": "linear", "symbol": "SOLUSDT", "limit": 1},
+    )
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_controlled_proposal_snapshot_is_read_only_and_complete():
+    venue = MockBybitVenue()
+    gateway, _ = _gateway(venue, dry_run=True)
+    snapshot = await gateway.controlled_proposal_snapshot("SOLUSDT")
+    assert snapshot.bid_price == Decimal("89.99")
+    assert snapshot.ask_price == Decimal("90")
+    assert snapshot.wallet_balance == Decimal("50")
+    assert snapshot.equity == Decimal("50")
+    assert snapshot.open_positions == 0
+    assert snapshot.open_order_ids == frozenset()
+    assert snapshot.fills_read is True
+    assert venue.posts == []
+    await gateway.close()

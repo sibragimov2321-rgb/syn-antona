@@ -10,6 +10,8 @@ import socket
 import uuid
 
 from app.core.config import get_settings
+from app.db import SessionLocal
+from app.exchanges.bybit_v5_gateway import BybitV5OrderGateway
 from app.shadow.engine import PROTOCOL_ID, ProspectiveShadowEngine
 from app.shadow.logging import configure_structured_logging, log_event
 from app.shadow.market import PublicLiveMarketData
@@ -20,6 +22,12 @@ from app.shadow.repository import ShadowRepository
 from app.shadow.status import snapshot_metrics
 from app.shadow.warmup_bundle import load_warmup_bundle
 from app.strategy_lab.phase4g import EXCHANGES
+from app.trading.controlled_live import ControlledLiveRepository
+from app.trading.first_live_proposal import (
+    FirstControlledLiveProposalCoordinator,
+    FirstLiveProposalRepository,
+    format_controlled_proposal_ru,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -160,6 +168,9 @@ async def run(arguments) -> None:
                 # Windows event loops and embedded runtimes may not expose signal handlers.
                 break
     lease_acquired = False
+    proposal_gateway = None
+    proposal_repository = FirstLiveProposalRepository(SessionLocal)
+    proposal_coordinator = None
     try:
         repository.ping()
         if not arguments.protocol_lock.exists():
@@ -182,6 +193,17 @@ async def run(arguments) -> None:
         protocol = verify_existing_lock(
             arguments.protocol_lock, repository, project_root, warmups
         )
+        # Persist the prospective cut-off before looking for a signal. Existing
+        # shadow decisions are intentionally ineligible for Phase 5E.
+        proposal_repository.initialize()
+        ControlledLiveRepository(SessionLocal).state()
+        if os.getenv("BYBIT_API_KEY") and os.getenv("BYBIT_API_SECRET"):
+            proposal_gateway = BybitV5OrderGateway.from_environment(SessionLocal)
+            proposal_coordinator = FirstControlledLiveProposalCoordinator(
+                proposal_repository,
+                proposal_gateway,
+                settings.admin_telegram_ids,
+            )
         orphan_decisions = repository.repair_orphan_decisions(
             PROTOCOL_ID, protocol["strategy_config_hash"]
         )
@@ -270,6 +292,35 @@ async def run(arguments) -> None:
         cycles = 0
         while True:
             result = await engine.cycle()
+            if proposal_coordinator is not None:
+                proposal_result = await proposal_coordinator.cycle()
+                if (
+                    proposal_result.notify
+                    and proposal_result.preview is not None
+                    and proposal_result.admin_id is not None
+                ):
+                    delivered = await notifier.controlled_proposal(
+                        format_controlled_proposal_ru(
+                            proposal_result.preview,
+                            proposal_result.available_equity,
+                        ),
+                        proposal_result.preview.proposal_id,
+                        proposal_result.admin_id,
+                    )
+                    if delivered:
+                        proposal_repository.mark_notified(
+                            proposal_result.preview.proposal_id
+                        )
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "first_controlled_live_proposal",
+                    {
+                        "status": proposal_result.status,
+                        "reason": proposal_result.reason,
+                        "real_orders_sent": 0,
+                    },
+                )
             await notifier.deliver_pending()
             cycles += 1
             statuses = await _update_exchange_health(
@@ -393,6 +444,8 @@ async def run(arguments) -> None:
         for shutdown_signal in installed_signals:
             loop.remove_signal_handler(shutdown_signal)
         await notifier.close()
+        if proposal_gateway is not None:
+            await proposal_gateway.close()
         await market.close()
 
 
