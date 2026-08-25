@@ -29,17 +29,17 @@ class ShadowNotifier:
     @staticmethod
     def _opened_text(trade) -> str:
         return (
-            "👁 <b>FIRST SHADOW TRADE</b>\n\n"
-            f"Exchange: {trade['exchange'].title()}\n"
-            f"Pair: {trade['symbol']}\n"
-            f"Direction: {trade['side']}\n"
-            f"Entry reference: {trade['entry_reference']}\n"
-            f"Simulated entry: {trade['entry_price']}\n"
-            f"Stop Loss: {trade['stop_loss']}\n"
-            f"Take Profit: {trade['take_profit']}\n"
-            f"Estimated risk: {trade['risk_amount']}\n"
-            f"Observed spread: {trade['observed_spread']}\n"
-            f"Estimated fees: {trade['expected_fees']}\n\n"
+            "👁 <b>ПЕРВАЯ SHADOW-СДЕЛКА</b>\n\n"
+            f"Биржа: {trade['exchange'].title()}\n"
+            f"Пара: {trade['symbol']}\n"
+            f"Направление: {trade['side']}\n"
+            f"Расчётная цена входа: {trade['entry_reference']}\n"
+            f"Виртуальный вход: {trade['entry_price']}\n"
+            f"Стоп-лосс: {trade['stop_loss']}\n"
+            f"Тейк-профит: {trade['take_profit']}\n"
+            f"Расчётный риск: {trade['risk_amount']}\n"
+            f"Наблюдаемый спред: {trade['observed_spread']}\n"
+            f"Расчётные комиссии: {trade['expected_fees']}\n\n"
             "Это виртуальная сделка. Реальный ордер не отправлен."
         )
 
@@ -56,10 +56,11 @@ class ShadowNotifier:
             await self.deliver_pending()
             return
         await self._send(
-            "👁 <b>SHADOW TRADE CLOSED</b>\n\n"
-            f"Exchange: {trade.exchange.title()}\nPair: {trade.symbol}\n"
-            f"Direction: {trade.side}\nExit: {values['exit_price']}\n"
-            f"Net PnL: ${values['realized_pnl']}\nReason: {values['exit_reason']}\n\n"
+            "👁 <b>SHADOW-СДЕЛКА ЗАКРЫТА</b>\n\n"
+            f"Биржа: {trade.exchange.title()}\nПара: {trade.symbol}\n"
+            f"Направление: {trade.side}\nВыход: {values['exit_price']}\n"
+            f"Чистый результат: ${values['realized_pnl']}\n"
+            f"Причина: {values['exit_reason']}\n\n"
             "Это виртуальная сделка."
         )
 
@@ -75,13 +76,13 @@ class ShadowNotifier:
                 trade = details["trade"]
                 values = details["values"]
                 text = (
-                    "👁 <b>SHADOW TRADE CLOSED</b>\n\n"
-                    f"Exchange: {trade['exchange'].title()}\n"
-                    f"Pair: {trade['symbol']}\n"
-                    f"Direction: {trade['side']}\n"
-                    f"Exit: {values['exit_price']}\n"
-                    f"Net PnL: ${values['realized_pnl']}\n"
-                    f"Reason: {values['exit_reason']}\n\n"
+                    "👁 <b>SHADOW-СДЕЛКА ЗАКРЫТА</b>\n\n"
+                    f"Биржа: {trade['exchange'].title()}\n"
+                    f"Пара: {trade['symbol']}\n"
+                    f"Направление: {trade['side']}\n"
+                    f"Выход: {values['exit_price']}\n"
+                    f"Чистый результат: ${values['realized_pnl']}\n"
+                    f"Причина: {values['exit_reason']}\n\n"
                     "Это виртуальная сделка."
                 )
             if await self._send(text):
@@ -90,7 +91,18 @@ class ShadowNotifier:
         return delivered
 
     async def system(self, title: str, message: str) -> None:
-        await self._send(f"⚠️ <b>{escape(title)}</b>\n\n{escape(message)}")
+        translated_titles = {
+            "STALE DATA": "УСТАРЕВШИЕ ДАННЫЕ",
+            "EXCHANGE OFFLINE": "БИРЖА НЕДОСТУПНА",
+            "EXCHANGE RESTORED": "БИРЖА СНОВА ДОСТУПНА",
+            "COLLECTOR RESTARTED": "COLLECTOR ПЕРЕЗАПУЩЕН",
+            "PROTOCOL HASH MISMATCH": "НЕСОВПАДЕНИЕ ХЭША ПРОТОКОЛА",
+            "SHADOW DATABASE/COLLECTOR FAILURE": "ОШИБКА SHADOW-БАЗЫ ИЛИ COLLECTOR",
+        }
+        await self._send(
+            f"⚠️ <b>{escape(translated_titles.get(title, title))}</b>\n\n"
+            f"{escape(message)}"
+        )
 
     async def daily(self, day_number: int, metrics: dict) -> None:
         costs = sum(
@@ -102,20 +114,20 @@ class ShadowNotifier:
             Decimal(),
         )
         await self._send(
-            "📊 <b>SHADOW DAILY REPORT</b>\n\n"
-            f"Day: {day_number} / 30\n"
-            f"Signals: {metrics.get('signals', 0)}\n"
-            f"Trades: {metrics.get('trades', 0)}\n"
-            f"Wins: {metrics.get('wins', 0)}\n"
-            f"Losses: {metrics.get('losses', 0)}\n"
-            f"Open positions: {metrics.get('open_positions', 0)}\n"
-            f"Gross PnL: ${metrics.get('gross_pnl', 0)}\n"
-            f"Costs: ${costs}\n"
-            f"Net PnL: ${metrics.get('net_pnl', 0)}\n"
-            f"PF: {metrics.get('net_pf', 0)}\n"
-            f"Expectancy: ${metrics.get('expectancy', 0)}\n"
-            f"Max DD: ${metrics.get('max_drawdown', 0)}\n\n"
-            "Стратегия остаётся frozen; отчёт не изменяет её параметры."
+            "📊 <b>ЕЖЕДНЕВНЫЙ SHADOW-ОТЧЁТ</b>\n\n"
+            f"День: {day_number} / 30\n"
+            f"Сигналы: {metrics.get('signals', 0)}\n"
+            f"Сделки: {metrics.get('trades', 0)}\n"
+            f"Прибыльные: {metrics.get('wins', 0)}\n"
+            f"Убыточные: {metrics.get('losses', 0)}\n"
+            f"Открытые позиции: {metrics.get('open_positions', 0)}\n"
+            f"Результат до расходов: ${metrics.get('gross_pnl', 0)}\n"
+            f"Расходы: ${costs}\n"
+            f"Чистый результат: ${metrics.get('net_pnl', 0)}\n"
+            f"Профит-фактор: {metrics.get('net_pf', 0)}\n"
+            f"Ожидаемый результат сделки: ${metrics.get('expectancy', 0)}\n"
+            f"Максимальная просадка: ${metrics.get('max_drawdown', 0)}\n\n"
+            "Стратегия остаётся зафиксированной; отчёт не изменяет её параметры."
         )
 
     async def _send(self, text: str) -> bool:

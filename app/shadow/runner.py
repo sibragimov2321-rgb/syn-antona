@@ -191,7 +191,7 @@ async def run(arguments) -> None:
                 notifier,
                 "COLLECTOR_RESTARTED",
                 "COLLECTOR RESTARTED",
-                f"Collector продолжил protocol {existing.protocol_hash[:12]}…; restart #{restart_count}.",
+                f"Collector продолжил протокол {existing.protocol_hash[:12]}…; перезапуск №{restart_count}.",
                 severity="INFO",
             )
 
@@ -212,7 +212,7 @@ async def run(arguments) -> None:
                     notifier,
                     "EXCHANGE_OFFLINE",
                     "EXCHANGE OFFLINE",
-                    f"{exchange.title()}: {health.get('reason', 'startup health failed')}",
+                    f"{exchange.title()}: {health.get('reason', 'ошибка проверки при запуске')}",
                     exchange=exchange,
                 )
 

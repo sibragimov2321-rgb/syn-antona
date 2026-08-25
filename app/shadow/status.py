@@ -62,29 +62,36 @@ def system_status(
 def telegram_system_status(repository: ShadowRepository) -> str:
     values = system_status(repository)
     if values["protocol"] == "MISSING":
-        return "🔴 <b>Shadow System Status</b>\n\nProtocol: MISSING\nLive trading: OFF"
+        return "🔴 <b>СОСТОЯНИЕ SHADOW-СИСТЕМЫ</b>\n\nПротокол: НЕ НАЙДЕН\nРеальная торговля: ВЫКЛЮЧЕНА"
+    status_labels = {
+        "HEALTHY": "РАБОТАЕТ",
+        "DEGRADED": "НЕСТАБИЛЬНО",
+        "OFFLINE": "НЕДОСТУПНА",
+    }
     exchange_lines = []
     for exchange in ("binance", "bybit", "okx", "bitget"):
         health = values["exchanges"].get(exchange, {"status": "OFFLINE"})
-        exchange_lines.append(f"{exchange.title()}: {health['status']}")
+        exchange_lines.append(
+            f"{exchange.title()}: {status_labels.get(health['status'], health['status'])}"
+        )
     uptime = values["collector_uptime_seconds"]
     return (
-        "🟢 <b>Shadow System Status</b>\n\n"
-        f"Validation day: {values['validation_day']} / 30\n"
-        "Protocol: LOCKED\n"
-        f"Strategy hash: <code>{values['strategy_hash'][:12]}…</code>\n"
-        "Live trading: OFF\n\n"
+        "🟢 <b>СОСТОЯНИЕ SHADOW-СИСТЕМЫ</b>\n\n"
+        f"День проверки: {values['validation_day']} / 30\n"
+        "Протокол: ЗАФИКСИРОВАН\n"
+        f"Хэш стратегии: <code>{values['strategy_hash'][:12]}…</code>\n"
+        "Реальная торговля: ВЫКЛЮЧЕНА\n\n"
         + "\n".join(exchange_lines)
         + "\n\n"
-        f"Last 1H candle: {values['last_1h_candle'] or 'NONE'}\n"
-        f"Signals: {values['signals']}\n"
-        f"WAIT: {values['wait']}\n"
-        f"LONG: {values['long']}\n"
-        f"SHORT: {values['short']}\n"
-        f"Open shadow positions: {values['open_positions']}\n"
-        f"Closed positions: {values['closed_positions']}\n"
-        f"Collector uptime: {uptime // 3600}h {(uptime % 3600) // 60}m\n"
-        f"Last DB write: {values['last_db_write'] or 'NONE'}"
+        f"Последняя свеча 1ч: {values['last_1h_candle'] or 'НЕТ'}\n"
+        f"Сигналы: {values['signals']}\n"
+        f"ОЖИДАНИЕ: {values['wait']}\n"
+        f"ПОКУПКА: {values['long']}\n"
+        f"ПРОДАЖА: {values['short']}\n"
+        f"Открытые shadow-позиции: {values['open_positions']}\n"
+        f"Закрытые позиции: {values['closed_positions']}\n"
+        f"Время работы collector: {uptime // 3600}ч {(uptime % 3600) // 60}м\n"
+        f"Последняя запись в БД: {values['last_db_write'] or 'НЕТ'}"
     )
 
 

@@ -30,20 +30,21 @@ async def run_demo_notifications(bot: Bot, chat_id: int) -> None:
                 if position:
                     await bot.send_message(
                         chat_id,
-                        "🟢 <b>DEMO POSITION OPENED</b>\n\n"
-                        f"Symbol: {position.symbol}\nDirection: {position.side}\n"
-                        f"Entry: {position.entry_price}\nPosition Size: {position.quantity}\n"
-                        f"Stop Loss: {position.stop_loss}\nTake Profit: {position.take_profit}\n"
-                        f"Risk: {demo.profile.risk_per_trade_pct:.2%}\n"
-                        f"R/R: {signal.risk_reward_ratio}\nSignal Score: {signal.signal_score}",
+                        "🟢 <b>DEMO-ПОЗИЦИЯ ОТКРЫТА</b>\n\n"
+                        f"Символ: {position.symbol}\nНаправление: {position.side}\n"
+                        f"Вход: {position.entry_price}\nРазмер позиции: {position.quantity}\n"
+                        f"Стоп-лосс: {position.stop_loss}\nТейк-профит: {position.take_profit}\n"
+                        f"Риск: {demo.profile.risk_per_trade_pct:.2%}\n"
+                        f"Риск/прибыль: {signal.risk_reward_ratio}\n"
+                        f"Оценка сигнала: {signal.signal_score}",
                         parse_mode="HTML",
                     )
                 for closed in demo.on_price(symbol, frames["5M"].price):
                     await bot.send_message(
                         chat_id,
-                        "🔴 <b>DEMO POSITION CLOSED</b>\n\n"
+                        "🔴 <b>DEMO-ПОЗИЦИЯ ЗАКРЫТА</b>\n\n"
                         f"{closed.position.symbol} {closed.position.side}\n"
-                        f"PnL: ${closed.realized_pnl}\nReason: {closed.reason}",
+                        f"Результат: ${closed.realized_pnl}\nПричина: {closed.reason}",
                         parse_mode="HTML",
                     )
         await asyncio.sleep(5)
@@ -53,23 +54,23 @@ def dashboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="▶️ Start DEMO", callback_data="demo:start"),
-                InlineKeyboardButton(text="⏸ Pause", callback_data="bot:pause"),
+                InlineKeyboardButton(text="▶️ Запустить DEMO", callback_data="demo:start"),
+                InlineKeyboardButton(text="⏸ Пауза", callback_data="bot:pause"),
             ],
-            [InlineKeyboardButton(text="🚨 Emergency Stop", callback_data="bot:emergency")],
+            [InlineKeyboardButton(text="🚨 Аварийная остановка", callback_data="bot:emergency")],
             [
-                InlineKeyboardButton(text="📊 Positions", callback_data="positions"),
-                InlineKeyboardButton(text="📈 AI Analysis", callback_data="analysis"),
+                InlineKeyboardButton(text="📊 Открытые позиции", callback_data="positions"),
+                InlineKeyboardButton(text="📈 Анализ", callback_data="analysis"),
             ],
             [
-                InlineKeyboardButton(text="🛡 Risk Management", callback_data="risk"),
-                InlineKeyboardButton(text="💼 Trade History", callback_data="history"),
+                InlineKeyboardButton(text="🛡 Управление риском", callback_data="risk"),
+                InlineKeyboardButton(text="💼 История сделок", callback_data="history"),
             ],
-            [InlineKeyboardButton(text="📉 Statistics", callback_data="statistics")],
+            [InlineKeyboardButton(text="📉 Статистика", callback_data="statistics")],
             [
-                InlineKeyboardButton(text="👁 Shadow Trading", callback_data="shadow"),
+                InlineKeyboardButton(text="👁 Shadow-торговля", callback_data="shadow"),
                 InlineKeyboardButton(
-                    text="🟢 System Status", callback_data="shadow:status"
+                    text="🟢 Состояние системы", callback_data="shadow:status"
                 ),
             ],
         ]
@@ -78,10 +79,11 @@ def dashboard() -> InlineKeyboardMarkup:
 
 def dashboard_text() -> str:
     return (
-        "🤖 <b>AI TRADING</b>\n\n"
-        "💰 Equity: $10,000.00\n📈 Today PnL: $0.00\n📊 Total PnL: $0.00\n"
-        "🟡 Bot: PAUSED\n⚙️ Mode: DEMO\n🎯 Open Positions: 0\n\n"
-        "Paper mode only. Every trade must pass the Risk Manager."
+        "🤖 <b>СЫН АНТОНА</b>\n\n"
+        "💰 Баланс: $10,000.00\n📈 Результат за сегодня: $0.00\n"
+        "📊 Общий результат: $0.00\n"
+        "🟡 Бот: НА ПАУЗЕ\n⚙️ Режим: DEMO\n🎯 Открытые позиции: 0\n\n"
+        "Только виртуальная торговля. Каждая сделка проходит проверку риск-менеджера."
     )
 
 
@@ -90,7 +92,7 @@ async def start(message: Message) -> None:
     await message.answer(
         "Добро пожаловать в «Сын Антона».\n\n"
         "1. Выберите DEMO\n2. Виртуальный баланс: $10,000\n"
-        "3. Пары: BTC/USDT, ETH/USDT\n4. Риск: Low\n\n"
+        "3. Пары: BTC/USDT, ETH/USDT\n4. Риск: низкий\n\n"
         + dashboard_text(),
         reply_markup=dashboard(),
         parse_mode="HTML",
@@ -102,10 +104,10 @@ async def actions(callback: CallbackQuery) -> None:
     if callback.data == "bot:emergency":
         demo.emergency_stop()
         await callback.message.answer(
-            "🚨 EMERGENCY STOP: DEMO entries stopped. Choose what to do with positions.",
+            "🚨 АВАРИЙНАЯ ОСТАНОВКА: новые DEMO-входы запрещены. Выберите действие с позициями.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Leave positions", callback_data="emergency:keep"),
-                InlineKeyboardButton(text="Close all DEMO positions", callback_data="emergency:close"),
+                InlineKeyboardButton(text="Оставить позиции", callback_data="emergency:keep"),
+                InlineKeyboardButton(text="Закрыть все DEMO-позиции", callback_data="emergency:close"),
             ]]),
         )
     elif callback.data == "demo:start":
@@ -113,57 +115,57 @@ async def actions(callback: CallbackQuery) -> None:
         demo.start()
         if demo_task is None or demo_task.done():
             demo_task = asyncio.create_task(run_demo_notifications(callback.bot, callback.message.chat.id))
-        await callback.message.answer("DEMO active. Risk: 0.5% per trade; daily loss limit: 2%.")
+        await callback.message.answer("DEMO запущен. Риск на сделку: 0,5%; дневной лимит убытка: 2%.")
     elif callback.data == "bot:pause":
         demo.pause()
-        await callback.message.answer("DEMO search paused. Existing DEMO positions remain protected.")
+        await callback.message.answer("Поиск DEMO-сделок приостановлен. Открытые позиции остаются защищены.")
     elif callback.data == "emergency:keep":
         demo.emergency_stop()
-        await callback.message.answer("🚨 DEMO search stopped. Existing positions remain monitored.")
+        await callback.message.answer("🚨 Поиск DEMO-сделок остановлен. Открытые позиции продолжают отслеживаться.")
     elif callback.data == "emergency:close":
         demo.emergency_stop(close_positions=True)
-        await callback.message.answer("🚨 DEMO search stopped and all DEMO positions were closed.")
+        await callback.message.answer("🚨 Поиск DEMO-сделок остановлен, все DEMO-позиции закрыты.")
     elif callback.data == "positions":
         positions = demo.broker.positions
-        text = "📈 <b>OPEN POSITIONS</b>\n\n" + ("No open DEMO positions." if not positions else "\n".join(
+        text = "📈 <b>ОТКРЫТЫЕ ПОЗИЦИИ</b>\n\n" + ("Открытых DEMO-позиций нет." if not positions else "\n".join(
             f"{item.symbol} {item.side}: {item.quantity} @ {item.entry_price}" for item in positions
         ))
         await callback.message.answer(text, parse_mode="HTML")
     elif callback.data == "history":
         records = [item for item in demo.journal.records if item.event_type != "SIGNAL"][-10:]
-        await callback.message.answer("💼 <b>TRADE HISTORY</b>\n\n" + ("No trades yet." if not records else "\n".join(
+        await callback.message.answer("💼 <b>ИСТОРИЯ СДЕЛОК</b>\n\n" + ("Сделок пока нет." if not records else "\n".join(
             f"{item.event_type}: {item.symbol}" for item in records
         )), parse_mode="HTML")
     elif callback.data == "statistics":
         stats = calculate_statistics(demo.closed_positions)
-        await callback.message.answer(f"📉 <b>STATISTICS</b>\n\nTrades: {stats.trades}\nNet PnL: ${stats.net_pnl}", parse_mode="HTML")
+        await callback.message.answer(f"📉 <b>СТАТИСТИКА</b>\n\nСделок: {stats.trades}\nЧистый результат: ${stats.net_pnl}", parse_mode="HTML")
     elif callback.data == "risk":
-        await callback.message.answer("🛡 <b>RISK SETTINGS</b>\n\nRisk/trade: 0.5%\nDaily loss: 2%\nMax positions: 2\nMax leverage: 2x\nMin R/R: 1:2", parse_mode="HTML")
+        await callback.message.answer("🛡 <b>НАСТРОЙКИ РИСКА</b>\n\nРиск на сделку: 0,5%\nДневной лимит убытка: 2%\nМаксимум позиций: 2\nМаксимальное плечо: 2x\nМинимум риск/прибыль: 1:2", parse_mode="HTML")
     elif callback.data == "analysis":
-        await callback.message.answer("📊 <b>AI ANALYSIS</b>\n\nPhase 2 uses technical rules only; AI API is disabled.", parse_mode="HTML")
+        await callback.message.answer("📊 <b>АНАЛИЗ</b>\n\nИспользуются только технические правила. AI API отключён.", parse_mode="HTML")
     elif callback.data == "shadow":
         repository = ShadowRepository()
         protocol = repository.protocol(PROTOCOL_ID)
         if not protocol:
-            text = "👁 <b>SHADOW TRADING</b>\n\nProspective service has not created its protocol lock yet."
+            text = "👁 <b>SHADOW-ТОРГОВЛЯ</b>\n\nЗафиксированный протокол пока не найден."
         else:
             locked_at = protocol.locked_at.replace(tzinfo=UTC) if protocol.locked_at.tzinfo is None else protocol.locked_at
             days = (datetime.now(UTC) - locked_at).total_seconds() / 86400
             closed = repository.closed_trades(PROTOCOL_ID)
             metrics = shadow_metrics(closed)
             text = (
-                "👁 <b>SHADOW TRADING</b>\n\n"
-                "Mode: SHADOW\nLive trading: OFF\n"
-                "Strategy: Volatility Expansion 1h\n"
-                f"Days observed: {days:.2f}\n"
-                f"Signals: {repository.decisions_count(PROTOCOL_ID, signals_only=True)}\n"
-                f"Open shadow positions: {len(repository.open_trades(PROTOCOL_ID))}\n"
-                f"Closed shadow positions: {metrics['trades']}\n"
-                f"Net Shadow PnL: ${metrics['net_pnl']}\n"
-                f"Net PF: {metrics['net_pf']}\n"
-                f"Expectancy: ${metrics['expectancy']}\n"
-                f"Max DD: ${metrics['max_drawdown']}\n"
-                f"Current protocol hash: <code>{protocol.protocol_hash}</code>"
+                "👁 <b>SHADOW-ТОРГОВЛЯ</b>\n\n"
+                "Режим: SHADOW\nРеальная торговля: ВЫКЛЮЧЕНА\n"
+                "Стратегия: расширение волатильности, 1 час\n"
+                f"Дней наблюдения: {days:.2f}\n"
+                f"Сигналов: {repository.decisions_count(PROTOCOL_ID, signals_only=True)}\n"
+                f"Открытых shadow-позиций: {len(repository.open_trades(PROTOCOL_ID))}\n"
+                f"Закрытых shadow-позиций: {metrics['trades']}\n"
+                f"Чистый результат: ${metrics['net_pnl']}\n"
+                f"Профит-фактор: {metrics['net_pf']}\n"
+                f"Ожидаемый результат сделки: ${metrics['expectancy']}\n"
+                f"Максимальная просадка: ${metrics['max_drawdown']}\n"
+                f"Хэш протокола: <code>{protocol.protocol_hash}</code>"
             )
         await callback.message.answer(text, parse_mode="HTML")
     elif callback.data == "shadow:status":
@@ -171,14 +173,14 @@ async def actions(callback: CallbackQuery) -> None:
             telegram_system_status(ShadowRepository()), parse_mode="HTML"
         )
     else:
-        await callback.message.answer("This dashboard section is planned for the next increment.")
+        await callback.message.answer("Этот раздел пока находится в разработке.")
     await callback.answer()
 
 
 async def main() -> None:
     settings = get_settings()
     if not settings.telegram_bot_token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is required to start Telegram polling")
+        raise RuntimeError("Для запуска Telegram-бота требуется TELEGRAM_BOT_TOKEN")
     bot = Bot(settings.telegram_bot_token)
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
