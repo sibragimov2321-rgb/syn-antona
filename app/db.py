@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from decimal import Decimal
 
@@ -6,6 +6,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Date,
     ForeignKey,
     Integer,
     Numeric,
@@ -114,6 +115,16 @@ class ControlledLiveStateRecord(Base):
     first_order_executed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    automatic_execution_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    experiment_start_equity: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
+    starting_day_equity: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
+    starting_day_utc: Mapped[date | None] = mapped_column(Date, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )

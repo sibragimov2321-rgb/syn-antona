@@ -183,9 +183,9 @@ async def test_natural_frozen_signal_creates_exact_immutable_preview(
     assert result.preview.quantity == Decimal("0.1")
     assert result.preview.expected_notional == entry * Decimal("0.1")
     assert result.preview.expected_notional <= 10
-    assert result.preview.leverage == 1
-    assert result.preview.maximum_planned_loss <= Decimal("0.25")
-    assert result.preview.risk_reward_ratio >= 2
+    assert result.preview.leverage == 2
+    assert result.preview.maximum_planned_loss <= Decimal("2.50")
+    assert result.preview.risk_reward_ratio >= Decimal("1.5")
     state = repository.state()
     assert state.source_decision_id == decision_id
     assert state.status == "READY_FOR_USER_APPROVAL"
@@ -199,8 +199,9 @@ async def test_natural_frozen_signal_creates_exact_immutable_preview(
         "Take Profit:",
         "Максимальный плановый убыток:",
         "Расчётные комиссии:",
+        "Расчётное проскальзывание:",
         "Доступный equity:",
-        "DRY RUN",
+        "одноразового подтверждения администратора",
     ):
         assert value in text
 

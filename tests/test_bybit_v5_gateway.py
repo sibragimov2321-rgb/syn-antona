@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -9,7 +10,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db import Base, ExecutionOrderRecord
+from app.db import Base, ControlledLiveStateRecord, ExecutionOrderRecord
 from app.exchanges.bybit_v5_gateway import (
     BybitOrderRejected,
     BybitV5Http,
@@ -22,6 +23,7 @@ from app.core.config import get_settings
 from app.exchanges.models import InstrumentRules, OrderSide
 from app.trading.controlled_live import (
     ArmingGates,
+    CONTROLLED_LIVE_V1,
     ControlledLiveBlocked,
     ControlledLiveRepository,
     ControlledRiskSnapshot,
@@ -586,11 +588,20 @@ async def test_controlled_proposal_snapshot_is_read_only_and_complete():
 
 
 class GuardHttp:
-    def __init__(self, *, positions=None, bid="89.99", turnover="100000000", executions=None):
+    def __init__(
+        self,
+        *,
+        positions=None,
+        bid="89.99",
+        turnover="100000000",
+        executions=None,
+        equity="50",
+    ):
         self.positions = positions or []
         self.bid = bid
         self.turnover = turnover
         self.executions = executions or []
+        self.equity = equity
 
     async def public_get(self, path, params):
         if path.endswith("instruments-info"):
@@ -628,7 +639,7 @@ class GuardHttp:
         if path == "/v5/order/realtime":
             return {"list": []}
         if path == "/v5/account/wallet-balance":
-            return {"list": [{"totalEquity": "50"}]}
+            return {"list": [{"totalEquity": self.equity}]}
         if path == "/v5/execution/list":
             return {"list": self.executions}
         raise AssertionError(path)
@@ -703,4 +714,46 @@ async def test_production_guard_enforces_consecutive_losses(monkeypatch):
             quantity=Decimal("0.1"),
             client_order_id=preview.client_order_id,
         )
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_production_guard_enforces_starting_day_and_total_loss_limits(monkeypatch):
+    _, sessions, repository, preview = _preview()
+    _armed_environment(monkeypatch)
+    yesterday = datetime.now(UTC) - timedelta(days=1)
+    repository.refresh_loss_baselines(Decimal("50"), Decimal(), yesterday)
+    now_ms = int(time.time() * 1000)
+    daily_loss = [{
+        "orderId": "daily-loss",
+        "execPnl": "-5",
+        "execFee": "0",
+        "execTime": str(now_ms),
+    }]
+    with pytest.raises(ControlledLiveBlocked, match="Daily loss limit"):
+        await ProductionMutationGuard(
+            sessions,
+            GuardHttp(executions=daily_loss, equity="45"),
+        ).authorize(
+            action="CREATE",
+            symbol="SOLUSDT",
+            quantity=Decimal("0.1"),
+            client_order_id=preview.client_order_id,
+        )
+
+    with sessions.begin() as session:
+        state = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
+        state.starting_day_utc = datetime.now(UTC).date()
+        state.starting_day_equity = Decimal("50")
+    with pytest.raises(ControlledLiveBlocked, match="experiment loss limit"):
+        await ProductionMutationGuard(
+            sessions,
+            GuardHttp(equity="39.99"),
+        ).authorize(
+            action="CREATE",
+            symbol="SOLUSDT",
+            quantity=Decimal("0.1"),
+            client_order_id=preview.client_order_id,
+        )
+    assert repository.state().kill_switch_active
     get_settings.cache_clear()

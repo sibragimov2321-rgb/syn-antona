@@ -34,6 +34,7 @@ from app.trading.controlled_live import (
     CONTROLLED_LIVE_V1,
     CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
     ControlledLiveBlocked,
+    ControlledLiveRepository,
     ControlledProposalReadSnapshot,
     CurrentInstrumentState,
     LiveFill,
@@ -341,22 +342,31 @@ class ProductionMutationGuard:
         if not risk_reducing:
             if equity <= 0:
                 raise ControlledLiveBlocked("Account equity must be positive")
-            if daily_pnl <= -(equity * CONTROLLED_LIVE_V1.daily_loss_limit_pct):
+            experiment_start_equity, starting_day_equity = ControlledLiveRepository(
+                self._sessions
+            ).refresh_loss_baselines(equity, daily_pnl)
+            if daily_pnl <= -(
+                starting_day_equity * CONTROLLED_LIVE_V1.daily_loss_limit_pct
+            ):
                 raise ControlledLiveBlocked("Daily loss limit reached")
+            if (
+                experiment_start_equity - equity
+                >= CONTROLLED_LIVE_V1.total_experiment_loss_limit
+            ):
+                ControlledLiveRepository(self._sessions).activate_kill_switch()
+                raise ControlledLiveBlocked(
+                    "Total controlled-live experiment loss limit reached; kill switch activated"
+                )
             closed_results = _closed_order_results(executions.get("list") or [])
             consecutive_losses = 0
-            latest_loss_at = None
-            for _, pnl, closed_at in closed_results:
+            for _, pnl, _closed_at in closed_results:
                 if pnl >= 0:
                     break
                 consecutive_losses += 1
-                latest_loss_at = latest_loss_at or closed_at
             if consecutive_losses >= CONTROLLED_LIVE_V1.max_consecutive_losses:
-                raise ControlledLiveBlocked("Consecutive-loss protection is active")
-            if latest_loss_at and datetime.now(UTC) < latest_loss_at + timedelta(
-                minutes=CONTROLLED_LIVE_V1.cooldown_minutes
-            ):
-                raise ControlledLiveBlocked("60 minute cooldown is active")
+                raise ControlledLiveBlocked(
+                    "Consecutive-loss stop is active until the next UTC day"
+                )
         return GuardSnapshot(ask, open_positions, equity, daily_pnl)
 
     def _persistent_checks(
@@ -611,7 +621,10 @@ class BybitV5OrderGateway:
             await self.dry_run_market_request(preview, client_order_id)
             raise DryRunBlocked("DRY_RUN signed the request but did not send it")
         await self.set_leverage(
-            preview.symbol, Decimal("1"), client_order_id, preview.quantity
+            preview.symbol,
+            CONTROLLED_LIVE_V1.leverage,
+            client_order_id,
+            preview.quantity,
         )
         result = await self._mutate(
             "CREATE",
@@ -747,16 +760,28 @@ class BybitV5OrderGateway:
         client_order_id: str,
         quantity: Decimal | None = None,
     ) -> None:
-        if leverage != Decimal("1"):
-            raise ControlledLiveBlocked("Only 1x leverage is allowed")
+        if leverage != CONTROLLED_LIVE_V1.leverage:
+            raise ControlledLiveBlocked(
+                f"Only {CONTROLLED_LIVE_V1.leverage}x leverage is allowed"
+            )
+        positions = await self._http.private_get(
+            "/v5/position/list", {"category": "linear", "symbol": symbol}
+        )
+        current = {
+            _decimal(item.get("leverage"))
+            for item in positions.get("list") or []
+            if item.get("leverage") not in (None, "")
+        }
+        if current and current == {leverage}:
+            return
         await self._mutate(
             "SET_LEVERAGE",
             "/v5/position/set-leverage",
             {
                 "category": "linear",
                 "symbol": symbol,
-                "buyLeverage": "1",
-                "sellLeverage": "1",
+                "buyLeverage": _number(CONTROLLED_LIVE_V1.leverage),
+                "sellLeverage": _number(CONTROLLED_LIVE_V1.leverage),
             },
             symbol=symbol,
             quantity=quantity or self._approved_quantity(client_order_id),
@@ -1012,7 +1037,7 @@ class BybitV5OrderGateway:
         if (
             preview.symbol not in ALLOWED_SYMBOLS
             or preview.quantity <= 0
-            or preview.leverage != Decimal("1")
+            or preview.leverage != CONTROLLED_LIVE_V1.leverage
             or preview.expected_notional > MAX_NOTIONAL
             or preview.side not in {"BUY", "SELL"}
             or not preview.executable

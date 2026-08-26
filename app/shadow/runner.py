@@ -75,6 +75,7 @@ async def _controlled_execution_cycle(
             return
         reconciliation = await service.reconcile(preview)
         if reconciliation.get("status") == "MATCH":
+            controlled_repository.enable_automatic_execution_after_first_validation()
             phase_repository.mark_execution_status("FIRST_EXECUTION_VALIDATED")
             await notifier.system(
                 "CONTROLLED LIVE RESTART RECOVERY",
@@ -97,6 +98,7 @@ async def _controlled_execution_cycle(
     if settings.dry_run:
         return
     try:
+        automatic = controlled_repository.state().automatic_execution_enabled
         gates.require_all(expected_symbol=preview.symbol)
         fill = await service.execute_first_order(
             record.admin_telegram_id,
@@ -112,14 +114,22 @@ async def _controlled_execution_cycle(
             await asyncio.sleep(0.5)
         if reconciliation is None or reconciliation.get("status") != "MATCH":
             raise ReconciliationRequired("Immediate post-fill reconciliation mismatch")
-        phase_repository.mark_execution_status(
-            "EXECUTED_AWAITING_RESTART_VALIDATION"
-        )
-        await notifier.system(
-            "CONTROLLED LIVE FIRST EXECUTION",
-            f"{preview.symbol}: fill {fill.filled_quantity}; native SL/TP установлены; "
-            "reconciliation MATCH. Требуется Railway restart validation.",
-        )
+        if automatic:
+            phase_repository.mark_execution_status("AUTO_POSITION_OPEN")
+            await notifier.system(
+                "CONTROLLED LIVE EXECUTION",
+                f"{preview.symbol}: fill {fill.filled_quantity}; native SL/TP установлены; "
+                "reconciliation MATCH.",
+            )
+        else:
+            phase_repository.mark_execution_status(
+                "EXECUTED_AWAITING_RESTART_VALIDATION"
+            )
+            await notifier.system(
+                "CONTROLLED LIVE FIRST EXECUTION",
+                f"{preview.symbol}: fill {fill.filled_quantity}; native SL/TP установлены; "
+                "reconciliation MATCH. Требуется Railway restart validation.",
+            )
     except Exception as error:
         controlled_repository.activate_kill_switch()
         phase_repository.mark_execution_status(

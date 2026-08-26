@@ -4,7 +4,7 @@
   "internal_symbol": "SOL/USDT",
   "exchange": "bybit",
   "market_type": "USDT_PERPETUAL",
-  "base_profile_hash": "f9aef880cc9ac20b80d6db01adf8c0dab6e6085d84fd872889611013b1e69079",
+  "base_profile_hash": "f0e6296f82534071947ac0f7095abc64338a824286dde11c2d9e0d59749d7913",
   "selected_at": "2026-08-25T14:29:48.031000+00:00",
   "selection_rule": "highest_24h_turnover_non_memecoin_major_with_actual_minimum_notional_between_5_and_10_usdt",
   "selection_snapshot": {
@@ -20,11 +20,15 @@
     "open_interest": "6672134.3"
   },
   "runtime_rules": {
-    "leverage": "1",
+    "signal_threshold": 70,
+    "leverage": "2",
     "max_positions": 1,
     "max_trades_per_day": 4,
-    "risk_per_trade_pct": "0.005",
-    "daily_loss_limit_pct": "0.02",
+    "risk_per_trade_pct": "0.05",
+    "daily_loss_limit_pct": "0.10",
+    "total_experiment_loss_limit_usdt": "10",
+    "minimum_risk_reward": "1.5",
+    "consecutive_loss_stop_until_next_utc_day": true,
     "first_order_notional_cap": "10",
     "trailing_stop": false,
     "exchange_native_stop_loss_required": true,

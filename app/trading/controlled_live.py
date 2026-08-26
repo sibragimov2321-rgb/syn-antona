@@ -35,15 +35,16 @@ from app.trading.controlled_universe import (
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1.json"
-CONTROLLED_LIVE_V1_HASH = "f9aef880cc9ac20b80d6db01adf8c0dab6e6085d84fd872889611013b1e69079"
+CONTROLLED_LIVE_V1_HASH = "f0e6296f82534071947ac0f7095abc64338a824286dde11c2d9e0d59749d7913"
 FIRST_INSTRUMENT_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1_first_symbol.json"
 )
 CONTROLLED_LIVE_V1_FIRST_INSTRUMENT_HASH = (
-    "63a3b52a6aecc19202d778ba6a50885eb9f8db9707bfc9aec5defc358e08a73b"
+    "58a2fb93d6bc6baaf138403bb75eb8300fcdf40811f51bc71ef7a55969e4262e"
 )
 MANUAL_SOURCE = "MANUAL_EXECUTION_VALIDATION"
 BYBIT_TAKER_FEE_RATE = Decimal("0.00055")
+MULTI_SYMBOL_GATE_VALUE = "MULTI_SYMBOL_SCANNER"
 
 
 class ControlledLiveBlocked(PermissionError):
@@ -65,16 +66,20 @@ class ControlledLiveProfile:
     symbol: str
     exchange_symbol: str
     market_type: str
+    signal_threshold: int
     leverage: Decimal
     max_positions: int
     max_trades_per_day: int
     risk_per_trade_pct: Decimal
     daily_loss_limit_pct: Decimal
+    total_experiment_loss_limit: Decimal
     max_consecutive_losses: int
+    consecutive_loss_stop_until_next_utc_day: bool
     cooldown_minutes: int
     minimum_risk_reward: Decimal
     max_position_notional: Decimal
     first_execution_notional_cap: Decimal
+    estimated_slippage_per_leg: Decimal
     trailing_stop: bool
     config_hash: str
 
@@ -91,16 +96,24 @@ def load_controlled_live_profile(path: Path = PROFILE_PATH) -> ControlledLivePro
         symbol=raw["symbol"],
         exchange_symbol=raw["exchange_symbol"],
         market_type=raw["market_type"],
+        signal_threshold=int(raw["signal_threshold"]),
         leverage=Decimal(raw["leverage"]),
         max_positions=int(raw["max_positions"]),
         max_trades_per_day=int(raw["max_trades_per_day"]),
         risk_per_trade_pct=Decimal(raw["risk_per_trade_pct"]),
         daily_loss_limit_pct=Decimal(raw["daily_loss_limit_pct"]),
+        total_experiment_loss_limit=Decimal(
+            raw["total_experiment_loss_limit_usdt"]
+        ),
         max_consecutive_losses=int(raw["max_consecutive_losses"]),
+        consecutive_loss_stop_until_next_utc_day=bool(
+            raw["consecutive_loss_stop_until_next_utc_day"]
+        ),
         cooldown_minutes=int(raw["cooldown_minutes"]),
         minimum_risk_reward=Decimal(raw["minimum_risk_reward"]),
         max_position_notional=Decimal(raw["max_position_notional_usdt"]),
         first_execution_notional_cap=Decimal(raw["first_execution_notional_cap_usdt"]),
+        estimated_slippage_per_leg=Decimal(raw["estimated_slippage_per_leg"]),
         trailing_stop=bool(raw["trailing_stop"]),
         config_hash=config_hash,
     )
@@ -175,9 +188,17 @@ class ArmingGates:
         ]
         if disabled:
             raise ControlledLiveBlocked("Order submission gates are disabled: " + ", ".join(disabled))
-        if expected_symbol is not None and self.first_symbol != expected_symbol:
+        multi_symbol_gate = (
+            self.first_symbol == MULTI_SYMBOL_GATE_VALUE
+            and expected_symbol in ALLOWED_SCANNER_SYMBOLS
+        )
+        if (
+            expected_symbol is not None
+            and self.first_symbol != expected_symbol
+            and not multi_symbol_gate
+        ):
             raise ControlledLiveBlocked(
-                "CONTROLLED_LIVE_V1_FIRST_SYMBOL does not match the immutable selection"
+                "CONTROLLED_LIVE_V1_FIRST_SYMBOL does not authorize this proposal"
             )
 
 
@@ -194,6 +215,8 @@ class ControlledRiskSnapshot:
     daily_realized_pnl: Decimal = Decimal()
     consecutive_losses: int = 0
     cooldown_until: datetime | None = None
+    starting_day_equity: Decimal | None = None
+    experiment_start_equity: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -211,12 +234,14 @@ class ManualExecutionPreview:
     profile_hash: str
     selection_hash: str
     source: str
+    signal_score: int
     symbol: str
     side: str
     quantity: Decimal
     expected_notional: Decimal
     leverage: Decimal
     expected_fee: Decimal
+    estimated_slippage: Decimal
     stop_loss: Decimal
     take_profit: Decimal
     maximum_planned_loss: Decimal
@@ -260,20 +285,25 @@ def build_manual_preview(
     reward = _per_unit_reward(inputs)
     ratio = reward / per_unit_risk if per_unit_risk > 0 else Decimal()
     if reason is None and ratio < profile.minimum_risk_reward:
-        reason = "Minimum R/R 1:2 is not met"
+        reason = f"Minimum R/R 1:{profile.minimum_risk_reward} is not met"
+    if reason is None and profile.leverage > rules.maximum_leverage:
+        reason = "Configured leverage exceeds the current instrument limit"
 
     quantity = Decimal()
     expected_notional = Decimal()
     expected_fee = Decimal()
+    estimated_slippage = Decimal()
     maximum_loss = Decimal()
     if reason is None:
         risk_budget = risk.equity * profile.risk_per_trade_pct
-        loss_and_fee_per_unit = (
+        loss_fee_and_slippage_per_unit = (
             per_unit_risk
             + inputs.reference_price * BYBIT_TAKER_FEE_RATE
             + inputs.stop_loss * BYBIT_TAKER_FEE_RATE
+            + (inputs.reference_price + inputs.stop_loss)
+            * profile.estimated_slippage_per_leg
         )
-        risk_quantity = risk_budget / loss_and_fee_per_unit
+        risk_quantity = risk_budget / loss_fee_and_slippage_per_unit
         cap = min(instrument.first_order_notional_cap, profile.max_position_notional)
         cap_quantity = cap / inputs.reference_price
         raw_quantity = min(risk_quantity, cap_quantity)
@@ -284,7 +314,10 @@ def build_manual_preview(
         expected_fee = quantity * (
             inputs.reference_price + inputs.stop_loss
         ) * BYBIT_TAKER_FEE_RATE
-        maximum_loss = quantity * per_unit_risk + expected_fee
+        estimated_slippage = quantity * (
+            inputs.reference_price + inputs.stop_loss
+        ) * profile.estimated_slippage_per_leg
+        maximum_loss = quantity * per_unit_risk + expected_fee + estimated_slippage
         if quantity < rules.minimum_quantity:
             reason = (
                 "Instrument minimum quantity exceeds the controlled first-order notional cap"
@@ -294,7 +327,10 @@ def build_manual_preview(
         elif expected_notional > cap:
             reason = "Controlled first-order notional cap exceeded"
         elif maximum_loss > risk_budget:
-            reason = "Maximum planned loss exceeds 0.5% equity"
+            reason = (
+                "Maximum planned loss exceeds "
+                f"{profile.risk_per_trade_pct * 100}% equity"
+            )
         elif expected_notional / profile.leverage + expected_fee > risk.available_balance:
             reason = "Insufficient available balance"
 
@@ -304,12 +340,14 @@ def build_manual_preview(
         profile_hash=profile.config_hash,
         selection_hash=instrument.selection_hash,
         source=MANUAL_SOURCE,
+        signal_score=0,
         symbol=instrument.symbol,
         side=inputs.side.value,
         quantity=quantity,
         expected_notional=expected_notional,
         leverage=profile.leverage,
         expected_fee=expected_fee,
+        estimated_slippage=estimated_slippage,
         stop_loss=inputs.stop_loss,
         take_profit=inputs.take_profit,
         maximum_planned_loss=maximum_loss,
@@ -333,12 +371,21 @@ def _risk_rejection(
         return "Maximum open positions reached"
     if risk.trades_today >= profile.max_trades_per_day:
         return "Maximum trades per UTC day reached"
-    if risk.daily_realized_pnl <= -(risk.equity * profile.daily_loss_limit_pct):
+    starting_day_equity = risk.starting_day_equity or risk.equity
+    if risk.daily_realized_pnl <= -(
+        starting_day_equity * profile.daily_loss_limit_pct
+    ):
         return "Daily loss limit reached"
+    if (
+        risk.experiment_start_equity is not None
+        and risk.experiment_start_equity - risk.equity
+        >= profile.total_experiment_loss_limit
+    ):
+        return "Total controlled-live experiment loss limit reached"
     if risk.consecutive_losses >= profile.max_consecutive_losses:
-        return "Consecutive-loss protection is active"
+        return "Consecutive-loss stop is active until the next UTC day"
     if risk.cooldown_until is not None and now < _aware(risk.cooldown_until):
-        return "60 minute cooldown is active"
+        return "UTC-day consecutive-loss stop is active"
     if _per_unit_risk(inputs) <= 0 or _per_unit_reward(inputs) <= 0:
         return "Invalid SL/TP ordering"
     return None
@@ -369,6 +416,7 @@ def format_preview_ru(preview: ManualExecutionPreview) -> str:
         f"Expected notional: ${preview.expected_notional}\n"
         f"Leverage: {preview.leverage}x\n"
         f"Expected fee: ${preview.expected_fee}\n"
+        f"Estimated slippage: ${preview.estimated_slippage}\n"
         f"SL: {preview.stop_loss}\n"
         f"TP: {preview.take_profit}\n"
         f"Maximum planned loss: ${preview.maximum_planned_loss}\n"
@@ -405,6 +453,47 @@ class ControlledLiveRepository:
             self._verify_selection(state.first_symbol, state.selection_hash)
             session.expunge(state)
             return state
+
+    def refresh_loss_baselines(
+        self,
+        equity: Decimal,
+        daily_realized_pnl: Decimal,
+        now: datetime | None = None,
+    ) -> tuple[Decimal, Decimal]:
+        """Persist experiment/day equity anchors without weakening loss gates."""
+        current = now or datetime.now(UTC)
+        with self.session_factory.begin() as session:
+            state = session.get(ControlledLiveStateRecord, self.profile.name)
+            if state is None:
+                raise ControlledLiveBlocked("Controlled-live persistent state is missing")
+            self._verify_hash(state.profile_hash)
+            if state.experiment_start_equity is None:
+                state.experiment_start_equity = equity
+            if state.starting_day_utc != current.date():
+                state.starting_day_utc = current.date()
+                state.starting_day_equity = equity - daily_realized_pnl
+            state.updated_at = current
+            return (
+                Decimal(state.experiment_start_equity),
+                Decimal(state.starting_day_equity or equity),
+            )
+
+    def enable_automatic_execution_after_first_validation(self) -> None:
+        with self.session_factory.begin() as session:
+            state = session.get(ControlledLiveStateRecord, self.profile.name)
+            if state is None:
+                raise ControlledLiveBlocked("Controlled-live persistent state is missing")
+            self._verify_hash(state.profile_hash)
+            if (
+                not state.first_order_executed
+                or state.first_order_in_progress
+                or state.kill_switch_active
+            ):
+                raise ControlledLiveBlocked(
+                    "First protected execution must be validated before automatic mode"
+                )
+            state.automatic_execution_enabled = True
+            state.updated_at = datetime.now(UTC)
 
     def save_preview(self, preview: ManualExecutionPreview, admin_id: int) -> None:
         if not preview.executable:
@@ -475,8 +564,13 @@ class ControlledLiveRepository:
             self._verify_hash(state.profile_hash)
             self._verify_selection(preview.symbol, record.selection_hash)
             self._verify_selection(state.first_symbol, state.selection_hash)
-            if state.first_order_in_progress or state.first_order_executed:
-                raise ControlledLiveBlocked("First Mainnet order was already claimed or executed")
+            if state.first_order_in_progress or (
+                state.first_order_executed
+                and not state.automatic_execution_enabled
+            ):
+                raise ControlledLiveBlocked(
+                    "Mainnet order was already claimed or executed; automatic mode is not validated"
+                )
             if record.proposal_hash != preview.proposal_hash or record.status != "APPROVED":
                 raise ControlledLiveBlocked("Exact approved proposal is required")
             if state.kill_switch_active:

@@ -130,16 +130,19 @@ def test_controlled_live_v1_is_frozen_and_exact() -> None:
     assert CONTROLLED_LIVE_V1.name == "CONTROLLED_LIVE_V1"
     assert CONTROLLED_LIVE_V1.config_hash == CONTROLLED_LIVE_V1_HASH
     assert CONTROLLED_LIVE_V1.symbol == "BTC/USDT"
-    assert CONTROLLED_LIVE_V1.leverage == 1
+    assert CONTROLLED_LIVE_V1.signal_threshold == 70
+    assert CONTROLLED_LIVE_V1.leverage == 2
     assert CONTROLLED_LIVE_V1.max_positions == 1
     assert CONTROLLED_LIVE_V1.max_trades_per_day == 4
-    assert CONTROLLED_LIVE_V1.risk_per_trade_pct == Decimal("0.005")
-    assert CONTROLLED_LIVE_V1.daily_loss_limit_pct == Decimal("0.02")
+    assert CONTROLLED_LIVE_V1.risk_per_trade_pct == Decimal("0.05")
+    assert CONTROLLED_LIVE_V1.daily_loss_limit_pct == Decimal("0.10")
+    assert CONTROLLED_LIVE_V1.total_experiment_loss_limit == Decimal("10")
     assert CONTROLLED_LIVE_V1.max_consecutive_losses == 2
-    assert CONTROLLED_LIVE_V1.cooldown_minutes == 60
-    assert CONTROLLED_LIVE_V1.minimum_risk_reward == 2
+    assert CONTROLLED_LIVE_V1.consecutive_loss_stop_until_next_utc_day is True
+    assert CONTROLLED_LIVE_V1.cooldown_minutes == 0
+    assert CONTROLLED_LIVE_V1.minimum_risk_reward == Decimal("1.5")
     assert CONTROLLED_LIVE_V1.max_position_notional == 10
-    assert CONTROLLED_LIVE_V1.first_execution_notional_cap == 5
+    assert CONTROLLED_LIVE_V1.first_execution_notional_cap == 10
     assert CONTROLLED_LIVE_V1.trailing_stop is False
     assert CONTROLLED_LIVE_V1_FIRST_SYMBOL == "SOLUSDT"
     assert (
@@ -191,8 +194,64 @@ def test_preview_sizes_from_equity_risk_and_caps_notional() -> None:
     assert preview.executable
     assert preview.quantity == Decimal("0.1")
     assert preview.expected_notional == Decimal("9.0")
-    assert preview.maximum_planned_loss <= Decimal("0.25")
+    assert preview.maximum_planned_loss <= Decimal("2.50")
     assert preview.risk_reward_ratio == 2
+
+
+def test_dynamic_sizing_uses_five_percent_risk_including_costs_at_two_x() -> None:
+    profile = replace(
+        CONTROLLED_LIVE_V1,
+        max_position_notional=Decimal("1000"),
+        first_execution_notional_cap=Decimal("1000"),
+    )
+    instrument = replace(
+        CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
+        first_order_notional_cap=Decimal("1000"),
+    )
+    rules = replace(_rules(), quantity_step=Decimal("0.001"))
+    preview = build_manual_preview(
+        _inputs(
+            reference_price=Decimal("100"),
+            stop_loss=Decimal("95"),
+            take_profit=Decimal("107.5"),
+        ),
+        _risk(),
+        rules,
+        profile=profile,
+        instrument=instrument,
+    )
+    assert preview.executable
+    assert preview.leverage == Decimal("2")
+    assert Decimal("2.49") <= preview.maximum_planned_loss <= Decimal("2.50")
+    assert preview.maximum_planned_loss == (
+        preview.quantity * Decimal("5")
+        + preview.expected_fee
+        + preview.estimated_slippage
+    )
+
+
+def test_total_experiment_loss_limit_is_hard_rejection() -> None:
+    preview = build_manual_preview(
+        _inputs(),
+        _risk(equity=Decimal("39.99"), experiment_start_equity=Decimal("50")),
+        _rules(),
+    )
+    assert not preview.executable
+    assert "experiment loss limit" in preview.reason
+
+
+def test_daily_limit_uses_starting_day_equity() -> None:
+    preview = build_manual_preview(
+        _inputs(),
+        _risk(
+            equity=Decimal("100"),
+            starting_day_equity=Decimal("50"),
+            daily_realized_pnl=Decimal("-5"),
+        ),
+        _rules(),
+    )
+    assert not preview.executable
+    assert "Daily loss limit" in preview.reason
 
 
 @pytest.mark.parametrize(
@@ -200,11 +259,11 @@ def test_preview_sizes_from_equity_risk_and_caps_notional() -> None:
     [
         (_risk(open_positions=1), "Maximum open positions"),
         (_risk(trades_today=4), "Maximum trades"),
-        (_risk(daily_realized_pnl=Decimal("-1")), "Daily loss"),
+        (_risk(daily_realized_pnl=Decimal("-5")), "Daily loss"),
         (_risk(consecutive_losses=2), "Consecutive-loss"),
         (
             _risk(cooldown_until=datetime.now(UTC) + timedelta(minutes=1)),
-            "cooldown",
+            "UTC-day",
         ),
     ],
 )

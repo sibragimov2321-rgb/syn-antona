@@ -35,6 +35,7 @@ from app.shadow.engine import PROTOCOL_ID
 from app.strategy_lab.phase4g import FROZEN_CONFIG_HASH, FROZEN_VERSION
 from app.trading.controlled_live import (
     CONTROLLED_LIVE_V1,
+    ControlledLiveRepository,
     ControlledRiskSnapshot,
     FirstInstrumentSelection,
     ManualExecutionPreview,
@@ -102,6 +103,7 @@ class ScannerInstrument:
     actual_minimum_notional: Decimal
     spread_pct: Decimal
     turnover_24h: Decimal
+    maximum_leverage: Decimal
     checked_at: datetime
 
 
@@ -237,8 +239,10 @@ class BybitMultiSymbolReadOnlyReader:
                 daily_realized_pnl=sum(order_results.values(), Decimal()),
                 consecutive_losses=losses,
                 cooldown_until=(
-                    latest_loss_time + timedelta(minutes=CONTROLLED_LIVE_V1.cooldown_minutes)
-                    if latest_loss_time and losses
+                    day_start + timedelta(days=1)
+                    if latest_loss_time
+                    and losses >= CONTROLLED_LIVE_V1.max_consecutive_losses
+                    and CONTROLLED_LIVE_V1.consecutive_loss_stop_until_next_utc_day
                     else None
                 ),
             ),
@@ -277,6 +281,9 @@ def _parse_instrument(
     midpoint = (bid + ask) / 2
     spread_pct = (ask - bid) / midpoint if midpoint > 0 and ask >= bid else Decimal("Infinity")
     turnover = _decimal(ticker.get("turnover24h"))
+    maximum_leverage = _decimal(
+        (instrument.get("leverageFilter") or {}).get("maxLeverage")
+    )
     status = str(instrument.get("status") or "")
     contract_type = str(instrument.get("contractType") or "")
     reasons = []
@@ -313,6 +320,7 @@ def _parse_instrument(
         actual_notional,
         spread_pct,
         turnover,
+        maximum_leverage,
         now,
     )
 
@@ -325,7 +333,7 @@ def _unavailable_instrument(symbol: str, now: datetime) -> ScannerInstrument:
         "Bybit instrument/ticker временно недоступен",
         "UNKNOWN",
         "UNKNOWN",
-        *(Decimal() for _ in range(10)),
+        *(Decimal() for _ in range(11)),
         now,
     )
 
@@ -435,7 +443,11 @@ class MultiSymbolScannerRepository:
         state = self.state()
         with self.session_factory() as session:
             phase = session.get(FirstLiveProposalStateRecord, CONTROLLED_LIVE_V1.name)
-            if phase is None or phase.proposal_id or phase.status != "WAITING_FOR_SIGNAL":
+            if (
+                phase is None
+                or phase.proposal_id
+                or phase.status not in {"WAITING_FOR_SIGNAL", "AUTO_RUNNING"}
+            ):
                 return ()
             filters = [
                 ShadowDecisionRecord.protocol_id == PROTOCOL_ID,
@@ -443,6 +455,7 @@ class MultiSymbolScannerRepository:
                 ShadowDecisionRecord.symbol.in_(SCANNER_INTERNAL_SYMBOLS),
                 ShadowDecisionRecord.decision.in_(("LONG", "SHORT")),
                 ShadowDecisionRecord.risk_status == "ALLOW",
+                ShadowDecisionRecord.signal_score >= CONTROLLED_LIVE_V1.signal_threshold,
                 ShadowDecisionRecord.strategy_hash == FROZEN_CONFIG_HASH,
                 ShadowDecisionRecord.created_at > state.started_at,
             ]
@@ -505,6 +518,20 @@ class MultiSymbolScannerRepository:
                 or 0
             )
 
+    def unresolved_execution_attempts(self) -> int:
+        with self.session_factory() as session:
+            return int(
+                session.scalar(
+                    select(func.count(ExecutionOrderRecord.id)).where(
+                        ExecutionOrderRecord.exchange == "bybit",
+                        ExecutionOrderRecord.status.in_(
+                            ("PENDING", "SUBMITTED", "UNKNOWN")
+                        ),
+                    )
+                )
+                or 0
+            )
+
 
 @dataclass(frozen=True)
 class RankedPreview:
@@ -530,40 +557,71 @@ class MultiSymbolFirstProposalCoordinator:
     async def cycle(self) -> ProposalCycleResult:
         self.scanner_repository.initialize()
         phase = self.phase_repository.initialize()
+        snapshot = None
         if phase.proposal_id:
-            record = self.phase_repository.proposal(phase.proposal_id)
-            from app.trading.first_live_proposal import preview_from_record
+            if phase.status in {"FIRST_EXECUTION_VALIDATED", "AUTO_POSITION_OPEN"}:
+                try:
+                    snapshot = await self.reader.read()
+                except Exception:
+                    self.scanner_repository.mark_transient_error(
+                        "Read-only Bybit scanner unavailable during position rollover"
+                    )
+                    return ProposalCycleResult(
+                        phase.status,
+                        "Cannot verify prior position closure; automatic scan remains blocked",
+                    )
+                if snapshot.account.open_positions or snapshot.account.open_order_ids:
+                    return ProposalCycleResult(
+                        phase.status,
+                        "Prior controlled-live position/order remains active",
+                    )
+                self.phase_repository.release_closed_position_for_automatic_scan()
+                phase = self.phase_repository.state()
+            else:
+                record = self.phase_repository.proposal(phase.proposal_id)
+                from app.trading.first_live_proposal import preview_from_record
 
-            preview = preview_from_record(record) if record else None
-            return ProposalCycleResult(
-                phase.status,
-                "Immutable proposal already exists",
-                preview,
-                Decimal(phase.available_equity or 0),
-                record.admin_telegram_id if record else None,
-                notify=bool(record and phase.notified_at is None),
-            )
+                preview = preview_from_record(record) if record else None
+                return ProposalCycleResult(
+                    phase.status,
+                    "Immutable proposal already exists",
+                    preview,
+                    Decimal(phase.available_equity or 0),
+                    record.admin_telegram_id if record else None,
+                    notify=bool(record and phase.notified_at is None),
+                )
         if not self.admin_ids:
             return ProposalCycleResult("WAITING_FOR_SIGNAL", "Admin is not configured")
-        try:
-            snapshot = await self.reader.read()
-        except Exception as error:
-            self.scanner_repository.mark_transient_error(
-                f"{type(error).__name__}: read-only Bybit scanner unavailable"
-            )
-            return ProposalCycleResult(
-                "WAITING_FOR_SIGNAL",
-                "Read-only scanner temporarily unavailable; no signal was consumed",
-            )
+        if snapshot is None:
+            try:
+                snapshot = await self.reader.read()
+            except Exception as error:
+                self.scanner_repository.mark_transient_error(
+                    f"{type(error).__name__}: read-only Bybit scanner unavailable"
+                )
+                return ProposalCycleResult(
+                    "WAITING_FOR_SIGNAL",
+                    "Read-only scanner temporarily unavailable; no signal was consumed",
+                )
         self.scanner_repository.save_market_snapshot(snapshot)
+        experiment_start_equity, starting_day_equity = ControlledLiveRepository(
+            self.scanner_repository.session_factory
+        ).refresh_loss_baselines(
+            snapshot.account.equity,
+            snapshot.account.daily_realized_pnl,
+            snapshot.fetched_at,
+        )
         candidates = self.scanner_repository.next_candidate_batch()
         if not candidates:
             return ProposalCycleResult("WAITING_FOR_SIGNAL", "No new admissible frozen signal")
-        if self.scanner_repository.local_execution_attempts():
+        if self.scanner_repository.unresolved_execution_attempts():
             return ProposalCycleResult(
                 "WAITING_FOR_SIGNAL",
-                "Local execution ledger is not clean; reconciliation required",
+                "Local execution ledger contains an unresolved order",
             )
+        automatic = ControlledLiveRepository(
+            self.scanner_repository.session_factory
+        ).state().automatic_execution_enabled
         ranked: list[RankedPreview] = []
         rejections = []
         for candidate in candidates:
@@ -575,7 +633,13 @@ class MultiSymbolFirstProposalCoordinator:
                 )
                 continue
             try:
-                preview = self._build(candidate, instrument, snapshot.account)
+                preview = self._build(
+                    candidate,
+                    instrument,
+                    snapshot.account,
+                    experiment_start_equity,
+                    starting_day_equity,
+                )
             except CandidateRejected as error:
                 rejections.append(f"{symbol}: {error}")
                 continue
@@ -602,17 +666,25 @@ class MultiSymbolFirstProposalCoordinator:
         )[0]
         admin_id = min(self.admin_ids)
         created = self.phase_repository.save_ready(
-            winner.candidate, winner.preview, admin_id, snapshot.account.equity
+            winner.candidate,
+            winner.preview,
+            admin_id,
+            snapshot.account.equity,
+            automatic=automatic,
         )
         if created:
             self.scanner_repository.mark_ready(candle_open)
         return ProposalCycleResult(
-            "READY_FOR_USER_APPROVAL",
-            f"Natural frozen {winner.instrument.symbol} signal won immutable ranking",
+            "APPROVED_FOR_EXECUTION" if automatic else "READY_FOR_USER_APPROVAL",
+            (
+                f"Natural {winner.instrument.symbol} signal passed automatic controlled-live gates"
+                if automatic
+                else f"Natural {winner.instrument.symbol} signal won deterministic ranking"
+            ),
             winner.preview,
             snapshot.account.equity,
             admin_id,
-            notify=created,
+            notify=created and not automatic,
         )
 
     def _build(
@@ -620,11 +692,15 @@ class MultiSymbolFirstProposalCoordinator:
         candidate: FrozenSignalCandidate,
         instrument: ScannerInstrument,
         account: ScannerAccount,
+        experiment_start_equity: Decimal,
+        starting_day_equity: Decimal,
     ) -> ManualExecutionPreview:
         if candidate.decision.strategy_hash != FROZEN_CONFIG_HASH:
             raise CandidateRejected("Frozen strategy hash mismatch")
         if candidate.decision.risk_status != "ALLOW":
             raise CandidateRejected("Deterministic Risk Manager did not ALLOW")
+        if candidate.decision.signal_score < CONTROLLED_LIVE_V1.signal_threshold:
+            raise CandidateRejected("Signal score is below the controlled-live threshold")
         if account.open_positions or account.open_order_ids:
             raise CandidateRejected("Bybit already has an open position or open order")
         if not account.fills_read:
@@ -659,19 +735,25 @@ class MultiSymbolFirstProposalCoordinator:
                 daily_realized_pnl=account.daily_realized_pnl,
                 consecutive_losses=account.consecutive_losses,
                 cooldown_until=account.cooldown_until,
+                starting_day_equity=starting_day_equity,
+                experiment_start_equity=experiment_start_equity,
             ),
             InstrumentRules(
                 instrument.tick_size,
                 instrument.quantity_step,
                 instrument.minimum_quantity,
                 instrument.minimum_notional,
-                maximum_leverage=Decimal("1"),
+                maximum_leverage=instrument.maximum_leverage,
             ),
             instrument=selection,
         )
         from dataclasses import replace
 
-        preview = replace(preview, source=FROZEN_SIGNAL_SOURCE)
+        preview = replace(
+            preview,
+            source=FROZEN_SIGNAL_SOURCE,
+            signal_score=int(candidate.decision.signal_score),
+        )
         if not preview.executable:
             raise CandidateRejected(preview.reason)
         if preview.expected_notional > SCANNER_CONFIG.maximum_order_notional:

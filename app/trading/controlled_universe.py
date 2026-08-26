@@ -15,7 +15,7 @@ CONFIG_PATH = (
     / "controlled_live_multi_symbol_v1.json"
 )
 MULTI_SYMBOL_CONFIG_HASH = (
-    "cb5b7cf5f2fedb07dbafbcb97bbf30fc99638cb9022f752a554a96e2e397f116"
+    "e04de86c0182ff633b218cd8a1d4503c1d4b4a63a7caa929c724d99a01413838"
 )
 PROFILE_NAME = "CONTROLLED_LIVE_MULTI_SYMBOL_V1"
 FROZEN_SIGNAL_SOURCE = "FROZEN_STRATEGY_ADMIN_REVIEW"
@@ -32,6 +32,12 @@ class MultiSymbolScannerConfig:
     minimum_turnover_24h: Decimal
     maximum_spread_pct: Decimal
     maximum_order_notional: Decimal
+    signal_threshold: int
+    leverage: Decimal
+    risk_per_trade_pct: Decimal
+    daily_loss_limit_pct: Decimal
+    total_experiment_loss_limit: Decimal
+    minimum_risk_reward: Decimal
     config_hash: str
 
 
@@ -44,16 +50,26 @@ def load_scanner_config(path: Path = CONFIG_PATH) -> MultiSymbolScannerConfig:
     if raw["version"] != PROFILE_NAME:
         raise RuntimeError("Unexpected multi-symbol scanner version")
     return MultiSymbolScannerConfig(
-        raw["version"],
-        raw["base_profile_hash"],
-        raw["frozen_strategy"],
-        raw["frozen_strategy_hash"],
-        tuple(raw["symbols"]),
-        Decimal(raw["maximum_actual_minimum_notional_usdt"]),
-        Decimal(raw["minimum_turnover_24h_usdt"]),
-        Decimal(raw["maximum_spread_pct"]),
-        Decimal(raw["maximum_order_notional_usdt"]),
-        config_hash,
+        version=raw["version"],
+        base_profile_hash=raw["base_profile_hash"],
+        frozen_strategy=raw["frozen_strategy"],
+        frozen_strategy_hash=raw["frozen_strategy_hash"],
+        symbols=tuple(raw["symbols"]),
+        maximum_actual_minimum_notional=Decimal(
+            raw["maximum_actual_minimum_notional_usdt"]
+        ),
+        minimum_turnover_24h=Decimal(raw["minimum_turnover_24h_usdt"]),
+        maximum_spread_pct=Decimal(raw["maximum_spread_pct"]),
+        maximum_order_notional=Decimal(raw["maximum_order_notional_usdt"]),
+        signal_threshold=int(raw["signal_threshold"]),
+        leverage=Decimal(raw["leverage"]),
+        risk_per_trade_pct=Decimal(raw["risk_per_trade_pct"]),
+        daily_loss_limit_pct=Decimal(raw["daily_loss_limit_pct"]),
+        total_experiment_loss_limit=Decimal(
+            raw["total_experiment_loss_limit_usdt"]
+        ),
+        minimum_risk_reward=Decimal(raw["minimum_risk_reward"]),
+        config_hash=config_hash,
     )
 
 

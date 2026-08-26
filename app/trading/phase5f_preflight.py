@@ -82,6 +82,21 @@ def _database_checks() -> dict:
             else "MISMATCH"
         ),
         "scanner_status": scanner.status if scanner is not None else "MISSING",
+        "experiment_start_equity": (
+            str(controlled.experiment_start_equity)
+            if controlled is not None and controlled.experiment_start_equity is not None
+            else "NOT_INITIALIZED"
+        ),
+        "starting_day_equity": (
+            str(controlled.starting_day_equity)
+            if controlled is not None and controlled.starting_day_equity is not None
+            else "NOT_INITIALIZED"
+        ),
+        "automatic_execution": (
+            "ENABLED"
+            if controlled is not None and controlled.automatic_execution_enabled
+            else "BLOCKED_UNTIL_FIRST_VALIDATION"
+        ),
         "execution_ledger_rows": execution_rows,
         "controlled_proposals": proposals,
     }
@@ -125,6 +140,14 @@ async def build_report() -> dict:
     gateway_ready = (
         frozenset(ALLOWED_SYMBOLS) == frozenset(SCANNER_CONFIG.symbols)
         and MAX_NOTIONAL == Decimal("10")
+        and CONTROLLED_LIVE_V1.signal_threshold == 70
+        and CONTROLLED_LIVE_V1.risk_per_trade_pct == Decimal("0.05")
+        and CONTROLLED_LIVE_V1.leverage == Decimal("2")
+        and CONTROLLED_LIVE_V1.max_positions == 1
+        and CONTROLLED_LIVE_V1.max_trades_per_day == 4
+        and CONTROLLED_LIVE_V1.minimum_risk_reward == Decimal("1.5")
+        and CONTROLLED_LIVE_V1.daily_loss_limit_pct == Decimal("0.10")
+        and CONTROLLED_LIVE_V1.total_experiment_loss_limit == Decimal("10")
         and MUTATING_PATHS
         == frozenset(
             {

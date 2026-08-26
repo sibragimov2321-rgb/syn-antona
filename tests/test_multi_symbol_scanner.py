@@ -94,6 +94,7 @@ def _instrument(
         actual_minimum_notional=max(Decimal("5"), minimum * ask_value),
         spread_pct=(ask_value - bid_value) / midpoint,
         turnover_24h=Decimal(turnover),
+        maximum_leverage=Decimal("100"),
         checked_at=datetime.now(UTC),
     )
 
@@ -223,7 +224,7 @@ async def test_simultaneous_candidates_use_frozen_deterministic_ranking():
     assert result.preview.symbol == "XRPUSDT"
     assert result.preview.selection_hash == scanner_selection_hash("XRPUSDT")
     assert result.preview.expected_notional <= Decimal("10")
-    assert result.preview.maximum_planned_loss <= Decimal("0.25")
+    assert result.preview.maximum_planned_loss <= Decimal("2.50")
     assert result.preview.risk_reward_ratio >= Decimal("2")
     with sessions() as session:
         assert session.scalar(select(func.count()).select_from(ControlledLiveProposalRecord)) == 1
@@ -237,12 +238,48 @@ async def test_simultaneous_candidates_use_frozen_deterministic_ranking():
     assert again.preview.proposal_id == result.preview.proposal_id
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("score", "expected"), ((69, "WAITING_FOR_SIGNAL"), (70, "READY_FOR_USER_APPROVAL")))
+async def test_controlled_live_signal_threshold_is_exactly_seventy(score, expected):
+    sessions, phase, scanner = _setup()
+    candle = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    _signal(
+        sessions,
+        "XRPUSDT",
+        "LONG",
+        score,
+        candle,
+        datetime.now(UTC),
+        "1.35",
+        "1.55",
+    )
+    result = await MultiSymbolFirstProposalCoordinator(
+        scanner,
+        phase,
+        Reader(
+            _market_snapshot(
+                _instrument(
+                    "XRPUSDT",
+                    bid="1.3999",
+                    ask="1.4",
+                    step="0.1",
+                    minimum_quantity="0.1",
+                    tick="0.0001",
+                )
+            )
+        ),
+        {42},
+    ).cycle()
+    assert result.status == expected
+
+
 class ExecutionGateway:
     dry_run = False
 
     def __init__(self):
         self.protected = False
         self.fill = None
+        self.position_open = True
 
     async def current_instrument_state(self, symbol):
         assert symbol == "XRPUSDT"
@@ -277,12 +314,17 @@ class ExecutionGateway:
         return 0
 
     async def snapshot(self):
-        return LiveGatewaySnapshot(
+        positions = (
             (
                 LivePositionSnapshot(
                     "XRPUSDT:0", "XRPUSDT", self.fill.filled_quantity
                 ),
-            ),
+            )
+            if self.position_open
+            else ()
+        )
+        return LiveGatewaySnapshot(
+            positions,
             frozenset(),
             frozenset({"xrp-order-1"}),
         )
@@ -393,6 +435,40 @@ async def test_worker_executes_only_after_arming_then_requires_restart_reconcili
     )
     assert phase.state().status == "FIRST_EXECUTION_VALIDATED"
     assert not controlled.state().kill_switch_active
+    assert controlled.state().automatic_execution_enabled
+
+    gateway.position_open = False
+    next_candle = candle + timedelta(hours=1)
+    _signal(
+        sessions,
+        "SOLUSDT",
+        "SHORT",
+        93,
+        next_candle,
+        datetime.now(UTC),
+        "91",
+        "87",
+    )
+    automatic = await MultiSymbolFirstProposalCoordinator(
+        scanner,
+        phase,
+        Reader(
+            _market_snapshot(
+                _instrument(
+                    "SOLUSDT",
+                    bid="90",
+                    ask="90.01",
+                    step="0.1",
+                    minimum_quantity="0.1",
+                    tick="0.01",
+                )
+            )
+        ),
+        {42},
+    ).cycle()
+    assert automatic.status == "APPROVED_FOR_EXECUTION"
+    assert automatic.notify is False
+    assert phase.proposal(automatic.preview.proposal_id).status == "APPROVED"
     get_settings.cache_clear()
 
 
@@ -525,7 +601,13 @@ async def test_multi_symbol_gateway_dry_run_builds_payload_but_sends_no_post():
     preview = build_manual_preview(
         ManualOrderInputs(OrderSide.BUY, Decimal("1.4"), Decimal("1.35"), Decimal("1.55")),
         ControlledRiskSnapshot(Decimal("50"), Decimal("50")),
-        InstrumentRules(Decimal("0.0001"), Decimal("0.1"), Decimal("0.1"), Decimal("5")),
+        InstrumentRules(
+            Decimal("0.0001"),
+            Decimal("0.1"),
+            Decimal("0.1"),
+            Decimal("5"),
+            maximum_leverage=Decimal("2"),
+        ),
         instrument=selection,
     )
     preview = replace(preview, source=FROZEN_SIGNAL_SOURCE)

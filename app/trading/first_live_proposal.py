@@ -102,7 +102,7 @@ class FirstLiveProposalRepository:
 
     def next_candidate(self) -> FrozenSignalCandidate | None:
         state = self.state()
-        if state.proposal_id or state.status != "WAITING_FOR_SIGNAL":
+        if state.proposal_id or state.status not in {"WAITING_FOR_SIGNAL", "AUTO_RUNNING"}:
             return None
         with self.session_factory() as session:
             filters = [
@@ -162,6 +162,8 @@ class FirstLiveProposalRepository:
         preview: ManualExecutionPreview,
         admin_id: int,
         available_equity: Decimal,
+        *,
+        automatic: bool = False,
     ) -> bool:
         if not preview.executable or preview.source != FROZEN_SIGNAL_SOURCE:
             raise ControlledLiveBlocked("Only an executable frozen-signal preview may be saved")
@@ -179,10 +181,17 @@ class FirstLiveProposalRepository:
                 or controlled.selection_hash
                 != CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.selection_hash
                 or controlled.first_order_in_progress
-                or controlled.first_order_executed
+                or (
+                    controlled.first_order_executed
+                    and not controlled.automatic_execution_enabled
+                )
                 or controlled.kill_switch_active
             ):
                 raise ControlledLiveBlocked("Controlled-live persistent safety state is not ready")
+            if automatic and not controlled.automatic_execution_enabled:
+                raise ControlledLiveBlocked(
+                    "Automatic execution is not validated by the first protected trade"
+                )
             session.add(
                 ControlledLiveProposalRecord(
                     proposal_id=preview.proposal_id,
@@ -193,8 +202,9 @@ class FirstLiveProposalRepository:
                     admin_telegram_id=admin_id,
                     source=preview.source,
                     preview_json=json.dumps(preview.safe_dict(), sort_keys=True),
-                    status="PREVIEWED",
+                    status="APPROVED" if automatic else "PREVIEWED",
                     client_order_id=preview.client_order_id,
+                    approved_at=now if automatic else None,
                     created_at=now,
                     updated_at=now,
                 )
@@ -204,10 +214,30 @@ class FirstLiveProposalRepository:
             state.source_decision_id = candidate.decision.id
             state.proposal_id = preview.proposal_id
             state.available_equity = available_equity
-            state.status = "READY_FOR_USER_APPROVAL"
+            state.status = (
+                "APPROVED_FOR_EXECUTION" if automatic else "READY_FOR_USER_APPROVAL"
+            )
             state.last_error = None
             state.updated_at = now
         return True
+
+    def release_closed_position_for_automatic_scan(self) -> None:
+        """Advance only after Bybit reports no position/order for the prior trade."""
+        with self.session_factory.begin() as session:
+            state = session.get(FirstLiveProposalStateRecord, CONTROLLED_LIVE_V1.name)
+            controlled = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
+            if state is None or controlled is None or not state.proposal_id:
+                raise ControlledLiveBlocked("Controlled-live proposal state is incomplete")
+            if not controlled.automatic_execution_enabled or controlled.kill_switch_active:
+                raise ControlledLiveBlocked("Automatic execution is not safely enabled")
+            if state.status not in {"FIRST_EXECUTION_VALIDATED", "AUTO_POSITION_OPEN"}:
+                raise ControlledLiveBlocked("Previous execution is not ready for rollover")
+            state.proposal_id = None
+            state.source_decision_id = None
+            state.notified_at = None
+            state.status = "AUTO_RUNNING"
+            state.last_error = None
+            state.updated_at = datetime.now(UTC)
 
     def mark_notified(self, proposal_id: str) -> None:
         with self.session_factory.begin() as session:
@@ -237,6 +267,7 @@ class FirstLiveProposalRepository:
         allowed = {
             "EXECUTED_AWAITING_RESTART_VALIDATION",
             "FIRST_EXECUTION_VALIDATED",
+            "AUTO_POSITION_OPEN",
             "HALTED_EXECUTION_FAILURE",
             "HALTED_RECONCILIATION_MISMATCH",
         }
@@ -336,6 +367,8 @@ class FirstControlledLiveProposalCoordinator:
     ) -> ManualExecutionPreview:
         if candidate.decision.strategy_hash != FROZEN_CONFIG_HASH:
             raise CandidateRejected("Frozen strategy hash mismatch")
+        if candidate.decision.signal_score < CONTROLLED_LIVE_V1.signal_threshold:
+            raise CandidateRejected("Signal score is below the controlled-live threshold")
         if snapshot.status != "Trading" or snapshot.contract_type != "LinearPerpetual":
             raise CandidateRejected("SOLUSDT LinearPerpetual is not Trading")
         if snapshot.tick_size <= 0 or snapshot.quantity_step <= 0:
@@ -364,7 +397,7 @@ class FirstControlledLiveProposalCoordinator:
             quantity_step=snapshot.quantity_step,
             minimum_quantity=snapshot.minimum_quantity,
             minimum_notional=snapshot.minimum_notional,
-            maximum_leverage=Decimal("1"),
+            maximum_leverage=CONTROLLED_LIVE_V1.leverage,
         )
         preview = build_manual_preview(
             ManualOrderInputs(side, entry, stop, target),
@@ -375,7 +408,11 @@ class FirstControlledLiveProposalCoordinator:
             ),
             rules,
         )
-        preview = replace(preview, source=FROZEN_SIGNAL_SOURCE)
+        preview = replace(
+            preview,
+            source=FROZEN_SIGNAL_SOURCE,
+            signal_score=int(candidate.decision.signal_score),
+        )
         if not preview.executable:
             raise CandidateRejected(preview.reason)
         if preview.quantity != EXPECTED_QUANTITY:
@@ -404,8 +441,11 @@ def _native_levels(
             raise CandidateRejected("Fresh SHORT quote invalidated frozen SL/TP geometry")
     reward = abs(target - entry)
     risk = abs(entry - stop)
-    if risk <= 0 or reward / risk < Decimal("2"):
-        raise CandidateRejected("Fresh quote no longer provides minimum R/R 1:2")
+    if risk <= 0 or reward / risk < CONTROLLED_LIVE_V1.minimum_risk_reward:
+        raise CandidateRejected(
+            "Fresh quote no longer provides minimum R/R "
+            f"1:{CONTROLLED_LIVE_V1.minimum_risk_reward}"
+        )
     return stop, target
 
 
@@ -424,6 +464,7 @@ def preview_from_record(
         "expected_notional",
         "leverage",
         "expected_fee",
+        "estimated_slippage",
         "stop_loss",
         "take_profit",
         "maximum_planned_loss",
@@ -443,6 +484,7 @@ def format_controlled_proposal_ru(
     return (
         "🛡 <b>ПЕРВАЯ КОНТРОЛИРУЕМАЯ СДЕЛКА — ПРЕДЛОЖЕНИЕ</b>\n\n"
         "Источник: естественный сигнал зафиксированной стратегии\n"
+        f"Оценка сигнала: <b>{preview.signal_score}</b>\n"
         f"Направление: <b>{direction}</b>\n"
         f"Вход (свежий bid/ask): {entry}\n"
         f"Количество: {preview.quantity} {base_asset}\n"
@@ -453,6 +495,8 @@ def format_controlled_proposal_ru(
         f"Риск/прибыль: 1:{preview.risk_reward_ratio}\n"
         f"Максимальный плановый убыток: ${preview.maximum_planned_loss}\n"
         f"Расчётные комиссии: ${preview.expected_fee}\n"
+        f"Расчётное проскальзывание: ${preview.estimated_slippage}\n"
         f"Доступный equity: ${available_equity}\n\n"
-        "DRY RUN включён. Кнопка подтверждения не отправит ордер."
+        "Ордер будет разрешён только после одноразового подтверждения администратора "
+        "и повторной проверки всех hard safety gates."
     )

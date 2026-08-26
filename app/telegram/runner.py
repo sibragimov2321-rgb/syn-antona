@@ -249,7 +249,16 @@ async def actions(callback: CallbackQuery) -> None:
         stats = calculate_statistics(demo.closed_positions)
         await callback.message.answer(f"📉 <b>СТАТИСТИКА</b>\n\nСделок: {stats.trades}\nЧистый результат: ${stats.net_pnl}", parse_mode="HTML")
     elif callback.data == "risk":
-        await callback.message.answer("🛡 <b>НАСТРОЙКИ РИСКА</b>\n\nРиск на сделку: 0,5%\nДневной лимит убытка: 2%\nМаксимум позиций: 2\nМаксимальное плечо: 2x\nМинимум риск/прибыль: 1:2", parse_mode="HTML")
+        await callback.message.answer(
+            "🛡 <b>CONTROLLED LIVE — РИСК</b>\n\n"
+            "Порог сигнала: 70\nРиск на сделку: максимум 5% equity\n"
+            "Дневной лимит: 10% starting-day equity\n"
+            "Лимит эксперимента: $10\nМаксимум позиций: 1\n"
+            "Максимум сделок/день: 4\nПлечо: 2x\n"
+            "Минимум риск/прибыль: 1:1,5\nTrailing: OFF\n"
+            "После двух последовательных убытков: STOP до следующего UTC дня.",
+            parse_mode="HTML",
+        )
     elif callback.data == "analysis":
         await callback.message.answer("📊 <b>АНАЛИЗ</b>\n\nИспользуются только технические правила. AI API отключён.", parse_mode="HTML")
     elif callback.data == "shadow":
@@ -262,9 +271,17 @@ async def actions(callback: CallbackQuery) -> None:
             days = (datetime.now(UTC) - locked_at).total_seconds() / 86400
             closed = repository.closed_trades(PROTOCOL_ID)
             metrics = shadow_metrics(closed)
+            settings = get_settings()
+            live_armed = (
+                not settings.dry_run
+                and settings.live_trading_enabled
+                and settings.controlled_live_enabled
+                and settings.manual_first_order_approved
+            )
             text = (
                 "👁 <b>SHADOW-ТОРГОВЛЯ</b>\n\n"
-                "Режим: SHADOW\nРеальная торговля: ВЫКЛЮЧЕНА\n"
+                "Режим: SHADOW + CONTROLLED LIVE\n"
+                f"Controlled Live gates: {'ARMED' if live_armed else 'ВЫКЛЮЧЕНЫ'}\n"
                 "Стратегия: расширение волатильности, 1 час\n"
                 f"Дней наблюдения: {days:.2f}\n"
                 f"Сигналов: {repository.decisions_count(PROTOCOL_ID, signals_only=True)}\n"
