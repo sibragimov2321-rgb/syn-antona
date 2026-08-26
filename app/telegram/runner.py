@@ -25,6 +25,10 @@ from app.trading.first_live_proposal import (
     FROZEN_SIGNAL_SOURCE,
     FirstLiveProposalRepository,
 )
+from app.trading.multi_symbol_scanner import (
+    format_scanner_status_ru,
+    scanner_status,
+)
 
 router = Router()
 demo = DemoAutotrader()
@@ -172,14 +176,28 @@ async def actions(callback: CallbackQuery) -> None:
             if record.admin_telegram_id != callback.from_user.id:
                 raise PermissionError("Предложение принадлежит другому администратору.")
             if action == "approve":
-                # This callback deliberately records consent only. It never imports
-                # or calls the order gateway, even if configuration changes later.
+                # The Telegram process only records consent. The separately isolated
+                # shadow worker owns the gateway and re-checks every execution gate.
                 controlled.approve(record.proposal_hash, callback.from_user.id)
-                phase5e.mark_approved_dry_run(proposal_id)
-                await callback.message.answer(
-                    "✅ Подтверждение сохранено. DRY RUN: реальный ордер не отправлен. "
-                    "Все execution gates остаются закрыты."
+                settings = get_settings()
+                armed = (
+                    not settings.dry_run
+                    and settings.live_trading_enabled
+                    and settings.controlled_live_enabled
+                    and settings.manual_first_order_approved
                 )
+                if armed:
+                    phase5e.mark_approved_for_execution(proposal_id)
+                    await callback.message.answer(
+                        "✅ Подтверждение сохранено. Предложение передано изолированному "
+                        "execution worker; перед HTTP он повторно проверит все safety gates."
+                    )
+                else:
+                    phase5e.mark_approved_dry_run(proposal_id)
+                    await callback.message.answer(
+                        "✅ Подтверждение сохранено. DRY RUN: реальный ордер не отправлен. "
+                        "Execution gates остаются закрыты."
+                    )
             elif action == "cancel":
                 phase5e.cancel(proposal_id, callback.from_user.id)
                 await callback.message.answer(
@@ -260,6 +278,7 @@ async def actions(callback: CallbackQuery) -> None:
             )
             wait_status = await current_signal_wait_status()
             text += "\n\n" + format_signal_wait_status(wait_status)
+            text += "\n\n" + format_scanner_status_ru(scanner_status(SessionLocal))
         await callback.message.answer(
             text,
             parse_mode="HTML",
@@ -269,7 +288,9 @@ async def actions(callback: CallbackQuery) -> None:
         # Read-only refresh: no market fetch into the strategy and no decision run.
         wait_status = await current_signal_wait_status()
         await callback.message.answer(
-            format_signal_wait_status(wait_status),
+            format_signal_wait_status(wait_status)
+            + "\n\n"
+            + format_scanner_status_ru(scanner_status(SessionLocal)),
             parse_mode="HTML",
             reply_markup=signal_wait_keyboard(),
         )

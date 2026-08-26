@@ -39,9 +39,9 @@ from app.trading.controlled_live import (
     ManualOrderInputs,
     build_manual_preview,
 )
+from app.trading.controlled_universe import FROZEN_SIGNAL_SOURCE
 
 
-FROZEN_SIGNAL_SOURCE = "FROZEN_STRATEGY_ADMIN_REVIEW"
 EXPECTED_QUANTITY = Decimal("0.1")
 
 
@@ -189,7 +189,7 @@ class FirstLiveProposalRepository:
                     proposal_hash=preview.proposal_hash,
                     profile_name=CONTROLLED_LIVE_V1.name,
                     profile_hash=CONTROLLED_LIVE_V1.config_hash,
-                    selection_hash=CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.selection_hash,
+                    selection_hash=preview.selection_hash,
                     admin_telegram_id=admin_id,
                     source=preview.source,
                     preview_json=json.dumps(preview.safe_dict(), sort_keys=True),
@@ -222,6 +222,32 @@ class FirstLiveProposalRepository:
             if state is None or state.proposal_id != proposal_id:
                 raise ControlledLiveBlocked("Phase 5E proposal state mismatch")
             state.status = "APPROVED_DRY_RUN"
+            state.updated_at = datetime.now(UTC)
+
+    def mark_approved_for_execution(self, proposal_id: str) -> None:
+        with self.session_factory.begin() as session:
+            state = session.get(FirstLiveProposalStateRecord, CONTROLLED_LIVE_V1.name)
+            if state is None or state.proposal_id != proposal_id:
+                raise ControlledLiveBlocked("Phase 5F proposal state mismatch")
+            state.status = "APPROVED_FOR_EXECUTION"
+            state.last_error = None
+            state.updated_at = datetime.now(UTC)
+
+    def mark_execution_status(self, status: str, error: str | None = None) -> None:
+        allowed = {
+            "EXECUTED_AWAITING_RESTART_VALIDATION",
+            "FIRST_EXECUTION_VALIDATED",
+            "HALTED_EXECUTION_FAILURE",
+            "HALTED_RECONCILIATION_MISMATCH",
+        }
+        if status not in allowed:
+            raise ValueError("Unsupported Phase 5F execution status")
+        with self.session_factory.begin() as session:
+            state = session.get(FirstLiveProposalStateRecord, CONTROLLED_LIVE_V1.name)
+            if state is None or not state.proposal_id:
+                raise ControlledLiveBlocked("Phase 5F proposal state mismatch")
+            state.status = status
+            state.last_error = error[:1000] if error else None
             state.updated_at = datetime.now(UTC)
 
     def cancel(self, proposal_id: str, admin_id: int) -> None:
@@ -413,12 +439,13 @@ def format_controlled_proposal_ru(
 ) -> str:
     direction = "LONG" if preview.side == "BUY" else "SHORT"
     entry = preview.expected_notional / preview.quantity
+    base_asset = preview.symbol.removesuffix("USDT")
     return (
         "🛡 <b>ПЕРВАЯ КОНТРОЛИРУЕМАЯ СДЕЛКА — ПРЕДЛОЖЕНИЕ</b>\n\n"
         "Источник: естественный сигнал зафиксированной стратегии\n"
         f"Направление: <b>{direction}</b>\n"
         f"Вход (свежий bid/ask): {entry}\n"
-        f"Количество: {preview.quantity} SOL\n"
+        f"Количество: {preview.quantity} {base_asset}\n"
         f"Номинал: ${preview.expected_notional}\n"
         f"Плечо: {preview.leverage}x\n"
         f"Stop Loss: {preview.stop_loss}\n"

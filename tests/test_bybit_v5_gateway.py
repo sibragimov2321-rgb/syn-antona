@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import time
 from decimal import Decimal
 
 import httpx
@@ -125,6 +126,7 @@ class MockBybitVenue:
                             "symbol": "SOLUSDT",
                             "bid1Price": "89.99",
                             "ask1Price": "90",
+                            "turnover24h": "100000000",
                         }
                     ]
                 }
@@ -581,3 +583,124 @@ async def test_controlled_proposal_snapshot_is_read_only_and_complete():
     assert snapshot.fills_read is True
     assert venue.posts == []
     await gateway.close()
+
+
+class GuardHttp:
+    def __init__(self, *, positions=None, bid="89.99", turnover="100000000", executions=None):
+        self.positions = positions or []
+        self.bid = bid
+        self.turnover = turnover
+        self.executions = executions or []
+
+    async def public_get(self, path, params):
+        if path.endswith("instruments-info"):
+            return {
+                "list": [{
+                    "status": "Trading",
+                    "contractType": "LinearPerpetual",
+                    "lotSizeFilter": {
+                        "minOrderQty": "0.1",
+                        "qtyStep": "0.1",
+                        "minNotionalValue": "5",
+                    },
+                }]
+            }
+        return {
+            "list": [{
+                "bid1Price": self.bid,
+                "ask1Price": "90",
+                "lastPrice": "90",
+                "turnover24h": self.turnover,
+            }]
+        }
+
+    async def private_get(self, path, params):
+        if path == "/v5/user/query-api":
+            return {
+                "readOnly": 0,
+                "permissions": {
+                    "ContractTrade": ["Order", "Position"],
+                    "Wallet": [],
+                },
+            }
+        if path == "/v5/position/list":
+            return {"list": self.positions}
+        if path == "/v5/order/realtime":
+            return {"list": []}
+        if path == "/v5/account/wallet-balance":
+            return {"list": [{"totalEquity": "50"}]}
+        if path == "/v5/execution/list":
+            return {"list": self.executions}
+        raise AssertionError(path)
+
+
+def _armed_environment(monkeypatch):
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("CONTROLLED_LIVE_ENABLED", "true")
+    monkeypatch.setenv("MANUAL_FIRST_ORDER_APPROVED", "true")
+    monkeypatch.setenv("CONTROLLED_LIVE_V1_FIRST_SYMBOL", "SOLUSDT")
+    monkeypatch.setenv("DRY_RUN", "false")
+    monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "[42]")
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_production_guard_counts_positions_across_entire_unified_account(monkeypatch):
+    _, sessions, _, preview = _preview()
+    _armed_environment(monkeypatch)
+    http = GuardHttp(positions=[{"symbol": "XRPUSDT", "size": "1"}])
+    with pytest.raises(ControlledLiveBlocked, match="Maximum open positions"):
+        await ProductionMutationGuard(sessions, http).authorize(
+            action="CREATE",
+            symbol="SOLUSDT",
+            quantity=Decimal("0.1"),
+            client_order_id=preview.client_order_id,
+        )
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_production_guard_rechecks_spread_and_liquidity_before_http(monkeypatch):
+    _, sessions, _, preview = _preview()
+    _armed_environment(monkeypatch)
+    with pytest.raises(ControlledLiveBlocked, match="spread"):
+        await ProductionMutationGuard(sessions, GuardHttp(bid="89")).authorize(
+            action="CREATE",
+            symbol="SOLUSDT",
+            quantity=Decimal("0.1"),
+            client_order_id=preview.client_order_id,
+        )
+    with pytest.raises(ControlledLiveBlocked, match="turnover"):
+        await ProductionMutationGuard(sessions, GuardHttp(turnover="1000")).authorize(
+            action="CREATE",
+            symbol="SOLUSDT",
+            quantity=Decimal("0.1"),
+            client_order_id=preview.client_order_id,
+        )
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_production_guard_enforces_consecutive_losses(monkeypatch):
+    _, sessions, _, preview = _preview()
+    _armed_environment(monkeypatch)
+    now_ms = int(time.time() * 1000)
+    executions = [
+        {
+            "orderId": f"loss-{index}",
+            "execPnl": "-0.10",
+            "execFee": "0.01",
+            "execTime": str(now_ms - index * 1000),
+        }
+        for index in range(2)
+    ]
+    with pytest.raises(ControlledLiveBlocked, match="Consecutive-loss"):
+        await ProductionMutationGuard(
+            sessions, GuardHttp(executions=executions)
+        ).authorize(
+            action="CREATE",
+            symbol="SOLUSDT",
+            quantity=Decimal("0.1"),
+            client_order_id=preview.client_order_id,
+        )
+    get_settings.cache_clear()

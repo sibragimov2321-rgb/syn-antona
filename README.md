@@ -262,6 +262,30 @@ Normal WAIT decisions never generate Telegram notifications. Existing transition
 limited to the first eligible proposal, exchange OFFLINE/restored, stale data, collector stop and
 collector restart. All three execution gates remain false and `DRY_RUN=true`.
 
+## Phase 5F controlled-live multi-symbol scanner
+
+`CONTROLLED_LIVE_MULTI_SYMBOL_V1` observes only new, fully closed Bybit 1h decisions already
+produced by the unchanged `phase4g_volatility_expansion_1h_frozen_v1` pipeline. Its immutable
+allowlist is SOL, XRP, ADA, LINK, AVAX, SUI, NEAR and DOGE USDT Perpetual. Before a symbol can be
+used, a GET-only Mainnet check requires `Trading`/`LinearPerpetual`, actual minimum notional no
+higher than $10, 24h turnover of at least $25m and spread no higher than the existing Risk Manager
+limit of 0.2%. An excluded symbol is persisted with its factual reason.
+
+Only `LONG/SHORT + Risk Manager ALLOW` can enter the one-shot proposal ranking. Ranking is frozen
+as signal score descending, estimated spread/cost ascending, turnover descending and symbol name
+as the final deterministic tie-break. WAIT never creates a proposal. Telegram shows the persisted
+scanner state and does not run the strategy when the refresh button is pressed.
+
+Run the final GET-only arming check inside the Railway shadow service with:
+
+```bash
+python -m app.trading.phase5f_preflight
+```
+
+The command requires `DRY_RUN=true` and all three execution gates to remain false. It checks Bybit
+permissions, balance, positions/orders/fills, reconciliation, Telegram admin access, the persistent
+kill switch and scanner/profile hashes without sending a POST request.
+
 ## Phase 4G frozen cross-confirmation
 
 Phase 4G independently validates the exact Phase 4F `VOLATILITY_EXPANSION:1h:v1` configuration.

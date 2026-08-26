@@ -1,0 +1,43 @@
+{
+  "version": "CONTROLLED_LIVE_MULTI_SYMBOL_V1",
+  "base_profile_hash": "f9aef880cc9ac20b80d6db01adf8c0dab6e6085d84fd872889611013b1e69079",
+  "frozen_strategy": "phase4g_volatility_expansion_1h_frozen_v1",
+  "frozen_strategy_hash": "1fc165201603485c20ebc9e4709e710fc9192fb25679f8b0dab730c8cd8301be",
+  "exchange": "bybit",
+  "market_type": "LinearPerpetual",
+  "symbols": [
+    "SOLUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "LINKUSDT",
+    "AVAXUSDT",
+    "SUIUSDT",
+    "NEARUSDT",
+    "DOGEUSDT"
+  ],
+  "timeframe": "1h",
+  "maximum_actual_minimum_notional_usdt": "10",
+  "minimum_turnover_24h_usdt": "25000000",
+  "maximum_spread_pct": "0.002",
+  "maximum_order_notional_usdt": "10",
+  "leverage": "1",
+  "max_positions": 1,
+  "max_trades_per_day": 4,
+  "risk_per_trade_pct": "0.005",
+  "daily_loss_limit_pct": "0.02",
+  "max_consecutive_losses": 2,
+  "cooldown_minutes": 60,
+  "minimum_risk_reward": "2",
+  "trailing_stop": false,
+  "exchange_native_stop_loss_required": true,
+  "exchange_native_take_profit_required": true,
+  "ranking": [
+    "risk_manager_allow",
+    "signal_score_desc",
+    "spread_and_cost_asc",
+    "turnover_24h_desc",
+    "symbol_asc"
+  ],
+  "candidate_policy": "new fully closed prospective candle only; no retrospective proposal",
+  "order_policy": "manual admin approval required; all arming gates required; fail closed"
+}

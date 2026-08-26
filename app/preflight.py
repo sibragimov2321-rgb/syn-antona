@@ -28,6 +28,7 @@ CRITICAL_TESTS = (
     "tests/test_bybit_readonly.py",
     "tests/test_controlled_live.py",
     "tests/test_bybit_v5_gateway.py",
+    "tests/test_multi_symbol_scanner.py",
 )
 
 

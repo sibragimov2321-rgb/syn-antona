@@ -214,6 +214,58 @@ class SignalWaitRuntimeRecord(Base):
     )
 
 
+class MultiSymbolScannerStateRecord(Base):
+    """Durable prospective cursor for the immutable controlled-live scanner."""
+
+    __tablename__ = "multi_symbol_scanner_state"
+
+    profile_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_scanned_candle_open: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="RUNNING"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class MultiSymbolScannerInstrumentRecord(Base):
+    """Latest GET-only Bybit eligibility snapshot for one scanner symbol."""
+
+    __tablename__ = "multi_symbol_scanner_instruments"
+
+    profile_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    internal_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    exclusion_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    instrument_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    bid_price: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    ask_price: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    tick_size: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    minimum_quantity: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    quantity_step: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    minimum_notional: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    actual_minimum_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(24, 10), nullable=False
+    )
+    actual_minimum_notional: Mapped[Decimal] = mapped_column(
+        Numeric(24, 10), nullable=False
+    )
+    spread_pct: Mapped[Decimal] = mapped_column(Numeric(18, 12), nullable=False)
+    turnover_24h: Mapped[Decimal] = mapped_column(Numeric(30, 10), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
 class HistoricalCandleRecord(Base):
     __tablename__ = "historical_candles"
     __table_args__ = (

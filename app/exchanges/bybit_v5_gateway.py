@@ -1,4 +1,4 @@
-"""Fail-closed Bybit V5 gateway for the one controlled SOLUSDT validation order.
+"""Fail-closed Bybit V5 gateway for an approved controlled-live scanner symbol.
 
 The default is DRY_RUN.  Only the explicit mutation allowlist in this module can
 issue POST requests, and every POST is preceded by the production safety guard.
@@ -15,7 +15,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
@@ -46,13 +46,17 @@ from app.trading.execution_store import (
     OrderOutcomeUnknown,
     OrderRejected,
 )
+from app.trading.controlled_universe import (
+    SCANNER_CONFIG,
+    scanner_selection_hash,
+)
 
 
 MAINNET_BASE_URL = "https://api.bytick.com"
 RECV_WINDOW_MS = 5_000
 APPROVAL_TTL = timedelta(minutes=10)
 ALLOWED_SYMBOL = "SOLUSDT"
-ALLOWED_QUANTITY = Decimal("0.1")
+ALLOWED_SYMBOLS = frozenset(SCANNER_CONFIG.symbols)
 MAX_NOTIONAL = Decimal("10")
 MUTATING_PATHS = frozenset(
     {
@@ -241,17 +245,22 @@ class ProductionMutationGuard:
         risk_reducing: bool = False,
     ) -> GuardSnapshot:
         gates = ArmingGates.from_environment()
-        gates.require_all(expected_symbol=ALLOWED_SYMBOL)
+        gates.require_all(expected_symbol=symbol)
         if os.getenv("DRY_RUN", "true").strip().lower() != "false" and action != "DRY_RUN":
             raise DryRunBlocked("DRY_RUN=true blocks mutating HTTP before transport")
-        if symbol != ALLOWED_SYMBOL:
-            raise ControlledLiveBlocked("Only SOLUSDT is allowed")
-        if not risk_reducing and quantity != ALLOWED_QUANTITY:
-            raise ControlledLiveBlocked("First controlled order quantity must equal 0.1 SOL")
-        if risk_reducing and (quantity <= 0 or quantity > ALLOWED_QUANTITY):
-            raise ControlledLiveBlocked("Risk-reducing quantity is outside the controlled position")
+        if symbol not in ALLOWED_SYMBOLS:
+            raise ControlledLiveBlocked("Symbol is not in the immutable scanner allowlist")
 
         proposal, state, attempts_today = self._persistent_checks(client_order_id)
+        preview = json.loads(proposal.preview_json)
+        approved_symbol = str(preview.get("symbol") or "")
+        approved_quantity = _decimal(preview.get("quantity"))
+        if approved_symbol != symbol or approved_quantity <= 0:
+            raise ControlledLiveBlocked("Request does not match the exact approved proposal")
+        if not risk_reducing and quantity != approved_quantity:
+            raise ControlledLiveBlocked("Quantity does not match the exact approved proposal")
+        if risk_reducing and (quantity <= 0 or quantity > approved_quantity):
+            raise ControlledLiveBlocked("Risk-reducing quantity is outside the approved position")
         if state.kill_switch_active and not risk_reducing:
             raise ControlledLiveBlocked("Emergency kill switch is active")
         # The durable claim for the current request already exists by the time
@@ -267,26 +276,47 @@ class ProductionMutationGuard:
         if permissions["withdraw"] != "NO" or permissions["transfer"] != "NO":
             raise ControlledLiveBlocked("Withdraw and Transfer permissions must be disabled")
 
-        instrument, ask = await self._instrument_and_ask(symbol)
+        instrument, ticker = await self._instrument_and_ticker(symbol)
+        ask = _decimal(ticker.get("ask1Price") or ticker.get("lastPrice"))
+        bid = _decimal(ticker.get("bid1Price") or ticker.get("lastPrice"))
         lot = instrument.get("lotSizeFilter") or {}
         minimum_quantity = _decimal(lot.get("minOrderQty"))
         step = _decimal(lot.get("qtyStep"))
         minimum_notional = _decimal(lot.get("minNotionalValue"))
         if instrument.get("status") != "Trading" or instrument.get("contractType") != "LinearPerpetual":
-            raise ControlledLiveBlocked("SOLUSDT LinearPerpetual is not Trading")
+            raise ControlledLiveBlocked(f"{symbol} LinearPerpetual is not Trading")
+        midpoint = (bid + ask) / 2
+        spread_pct = (ask - bid) / midpoint if midpoint > 0 and ask >= bid else Decimal("Infinity")
+        if spread_pct > SCANNER_CONFIG.maximum_spread_pct:
+            raise ControlledLiveBlocked("Fresh spread exceeds the frozen Risk Manager limit")
+        if _decimal(ticker.get("turnover24h")) < SCANNER_CONFIG.minimum_turnover_24h:
+            raise ControlledLiveBlocked("Fresh 24h turnover is below the immutable liquidity gate")
         if step <= 0 or quantity % step or quantity < minimum_quantity:
             raise ControlledLiveBlocked("Quantity violates current Bybit instrument limits")
         notional = quantity * ask
         if notional < minimum_notional or notional > MAX_NOTIONAL:
             raise ControlledLiveBlocked("Current order notional is outside $5-$10")
+        actual_minimum_quantity = max(
+            minimum_quantity,
+            _ceil_step(minimum_notional / ask, step) if ask > 0 else Decimal(),
+        )
+        if actual_minimum_quantity * ask > SCANNER_CONFIG.maximum_actual_minimum_notional:
+            raise ControlledLiveBlocked("Current actual minimum order exceeds $10")
 
         positions = await self._http.private_get(
-            "/v5/position/list", {"category": "linear", "symbol": symbol}
+            "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}
         )
         open_positions = sum(_decimal(item.get("size")) > 0 for item in positions.get("list") or [])
         allowed_positions = 1 if risk_reducing or action == "PROTECTION" else 0
         if open_positions > allowed_positions:
             raise ControlledLiveBlocked("Maximum open positions reached")
+        if not risk_reducing and action == "CREATE":
+            orders = await self._http.private_get(
+                "/v5/order/realtime",
+                {"category": "linear", "settleCoin": "USDT", "openOnly": 0, "limit": 50},
+            )
+            if orders.get("list"):
+                raise ControlledLiveBlocked("An open Bybit order already exists")
 
         wallet = await self._http.private_get(
             "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"}
@@ -297,7 +327,6 @@ class ProductionMutationGuard:
             "/v5/execution/list",
             {
                 "category": "linear",
-                "symbol": symbol,
                 "startTime": _utc_day_start_ms(),
                 "limit": 100,
             },
@@ -314,6 +343,20 @@ class ProductionMutationGuard:
                 raise ControlledLiveBlocked("Account equity must be positive")
             if daily_pnl <= -(equity * CONTROLLED_LIVE_V1.daily_loss_limit_pct):
                 raise ControlledLiveBlocked("Daily loss limit reached")
+            closed_results = _closed_order_results(executions.get("list") or [])
+            consecutive_losses = 0
+            latest_loss_at = None
+            for _, pnl, closed_at in closed_results:
+                if pnl >= 0:
+                    break
+                consecutive_losses += 1
+                latest_loss_at = latest_loss_at or closed_at
+            if consecutive_losses >= CONTROLLED_LIVE_V1.max_consecutive_losses:
+                raise ControlledLiveBlocked("Consecutive-loss protection is active")
+            if latest_loss_at and datetime.now(UTC) < latest_loss_at + timedelta(
+                minutes=CONTROLLED_LIVE_V1.cooldown_minutes
+            ):
+                raise ControlledLiveBlocked("60 minute cooldown is active")
         return GuardSnapshot(ask, open_positions, equity, daily_pnl)
 
     def _persistent_checks(
@@ -341,7 +384,20 @@ class ProductionMutationGuard:
                 raise ControlledLiveBlocked("Proposal is not in an executable state")
             if proposal.profile_hash != CONTROLLED_LIVE_V1.config_hash:
                 raise ControlledLiveBlocked("Controlled-live profile hash mismatch")
-            if proposal.selection_hash != CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.selection_hash:
+            preview = json.loads(proposal.preview_json)
+            symbol = str(preview.get("symbol") or "")
+            if (
+                symbol not in ALLOWED_SYMBOLS
+                or proposal.selection_hash
+                not in {
+                    scanner_selection_hash(symbol),
+                    *(
+                        (CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.selection_hash,)
+                        if symbol == CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.symbol
+                        else ()
+                    ),
+                }
+            ):
                 raise ControlledLiveBlocked("Controlled-live instrument hash mismatch")
             start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
             attempts_today = session.scalar(
@@ -355,7 +411,37 @@ class ProductionMutationGuard:
             session.expunge(state)
             return proposal, state, int(attempts_today)
 
-    async def _instrument_and_ask(self, symbol: str) -> tuple[dict[str, Any], Decimal]:
+    def approved_request(self, client_order_id: str) -> tuple[str, Decimal]:
+        """Return the exact durable proposal identity without exposing credentials."""
+        with self._sessions() as session:
+            proposal = session.scalar(
+                select(ControlledLiveProposalRecord).where(
+                    ControlledLiveProposalRecord.client_order_id == client_order_id
+                )
+            )
+            if proposal is None:
+                raise ControlledLiveBlocked("Persistent admin proposal is missing")
+            preview = json.loads(proposal.preview_json)
+            symbol = str(preview.get("symbol") or "")
+            quantity = _decimal(preview.get("quantity"))
+            if symbol not in ALLOWED_SYMBOLS or quantity <= 0:
+                raise ControlledLiveBlocked("Persistent proposal payload is invalid")
+            return symbol, quantity
+
+    def approved_preview(self, client_order_id: str) -> tuple[dict[str, Any], str]:
+        with self._sessions() as session:
+            proposal = session.scalar(
+                select(ControlledLiveProposalRecord).where(
+                    ControlledLiveProposalRecord.client_order_id == client_order_id
+                )
+            )
+            if proposal is None:
+                raise ControlledLiveBlocked("Persistent admin proposal is missing")
+            return json.loads(proposal.preview_json), proposal.proposal_hash
+
+    async def _instrument_and_ticker(
+        self, symbol: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         instrument_result = await self._http.public_get(
             "/v5/market/instruments-info", {"category": "linear", "symbol": symbol}
         )
@@ -365,11 +451,11 @@ class ProductionMutationGuard:
         instruments = instrument_result.get("list") or []
         tickers = ticker_result.get("list") or []
         if not instruments or not tickers:
-            raise ControlledLiveBlocked("Fresh SOLUSDT quote/instrument data is unavailable")
+            raise ControlledLiveBlocked(f"Fresh {symbol} quote/instrument data is unavailable")
         ask = _decimal(tickers[0].get("ask1Price") or tickers[0].get("lastPrice"))
         if ask <= 0:
-            raise ControlledLiveBlocked("Fresh SOLUSDT ask is unavailable")
-        return instruments[0], ask
+            raise ControlledLiveBlocked(f"Fresh {symbol} ask is unavailable")
+        return instruments[0], tickers[0]
 
 
 class BybitV5OrderGateway:
@@ -389,6 +475,7 @@ class BybitV5OrderGateway:
         self._order_poll_attempts = order_poll_attempts
         self.last_dry_run: SignedMutation | None = None
         self._order_context: dict[str, str] = {}
+        self._proposal_context: dict[str, tuple[str, Decimal]] = {}
 
     @classmethod
     def from_environment(cls, session_factory) -> BybitV5OrderGateway:
@@ -416,7 +503,7 @@ class BybitV5OrderGateway:
         instrument = (instruments.get("list") or [None])[0]
         ticker = (tickers.get("list") or [None])[0]
         if not instrument or not ticker:
-            raise BybitGatewayError("SOLUSDT instrument/ticker is unavailable")
+            raise BybitGatewayError(f"{symbol} instrument/ticker is unavailable")
         lot = instrument.get("lotSizeFilter") or {}
         return CurrentInstrumentState(
             symbol,
@@ -459,7 +546,7 @@ class BybitV5OrderGateway:
         ticker = (tickers.get("list") or [None])[0]
         account = (wallet.get("list") or [None])[0]
         if not instrument or not ticker or not account:
-            raise BybitGatewayError("Incomplete read-only SOLUSDT/account snapshot")
+            raise BybitGatewayError(f"Incomplete read-only {symbol}/account snapshot")
         coins = account.get("coin") or []
         usdt = next((item for item in coins if item.get("coin") == "USDT"), {})
         lot = instrument.get("lotSizeFilter") or {}
@@ -467,7 +554,7 @@ class BybitV5OrderGateway:
         bid = _decimal(ticker.get("bid1Price"))
         ask = _decimal(ticker.get("ask1Price"))
         if bid <= 0 or ask <= 0 or ask < bid:
-            raise BybitGatewayError("Fresh SOLUSDT bid/ask is invalid")
+            raise BybitGatewayError(f"Fresh {symbol} bid/ask is invalid")
         return ControlledProposalReadSnapshot(
             symbol=symbol,
             contract_type=str(instrument.get("contractType") or ""),
@@ -496,6 +583,8 @@ class BybitV5OrderGateway:
     async def dry_run_market_request(
         self, preview: ManualExecutionPreview, client_order_id: str
     ) -> dict[str, Any]:
+        self._validate_preview(preview, client_order_id)
+        self._proposal_context[client_order_id] = (preview.symbol, preview.quantity)
         await self._authorizer.authorize(
             action="DRY_RUN",
             symbol=preview.symbol,
@@ -512,13 +601,18 @@ class BybitV5OrderGateway:
         self, preview: ManualExecutionPreview, client_order_id: str
     ) -> LiveFill:
         self._validate_preview(preview, client_order_id)
-        existing = await self.query_order(client_order_id=client_order_id)
+        self._proposal_context[client_order_id] = (preview.symbol, preview.quantity)
+        existing = await self.query_order(
+            client_order_id=client_order_id, symbol=preview.symbol
+        )
         if existing is not None:
             raise DuplicateOrderError("Bybit already has this deterministic client order ID")
         if self.dry_run:
             await self.dry_run_market_request(preview, client_order_id)
             raise DryRunBlocked("DRY_RUN signed the request but did not send it")
-        await self.set_leverage(preview.symbol, Decimal("1"), client_order_id)
+        await self.set_leverage(
+            preview.symbol, Decimal("1"), client_order_id, preview.quantity
+        )
         result = await self._mutate(
             "CREATE",
             "/v5/order/create",
@@ -533,7 +627,11 @@ class BybitV5OrderGateway:
         self._order_context[order_id] = client_order_id
         order = None
         for _ in range(self._order_poll_attempts):
-            order = await self.query_order(order_id=order_id, client_order_id=client_order_id)
+            order = await self.query_order(
+                order_id=order_id,
+                client_order_id=client_order_id,
+                symbol=preview.symbol,
+            )
             if order and str(order.get("orderStatus")) not in {"New", "Created", "Untriggered"}:
                 break
             await asyncio.sleep(0.25)
@@ -542,7 +640,11 @@ class BybitV5OrderGateway:
         status = str(order.get("orderStatus") or "")
         if status in {"Rejected", "Deactivated"}:
             raise BybitOrderRejected(f"Bybit order status is {status}")
-        fills = await self.query_executions(order_id=order_id, client_order_id=client_order_id)
+        fills = await self.query_executions(
+            order_id=order_id,
+            client_order_id=client_order_id,
+            symbol=preview.symbol,
+        )
         filled_quantity = _decimal(order.get("cumExecQty")) or sum(
             (_decimal(item.get("execQty")) for item in fills), Decimal()
         )
@@ -570,10 +672,13 @@ class BybitV5OrderGateway:
         *,
         order_id: str | None = None,
         client_order_id: str | None = None,
+        symbol: str | None = None,
     ) -> dict[str, Any] | None:
         if not order_id and not client_order_id:
             raise ValueError("order_id or client_order_id is required")
-        params = {"category": "linear", "symbol": ALLOWED_SYMBOL}
+        resolved_symbol = symbol or self._resolve_symbol(client_order_id, order_id)
+        self._require_symbol(resolved_symbol)
+        params = {"category": "linear", "symbol": resolved_symbol}
         if order_id:
             params["orderId"] = order_id
         if client_order_id:
@@ -590,8 +695,11 @@ class BybitV5OrderGateway:
         *,
         order_id: str | None = None,
         client_order_id: str | None = None,
+        symbol: str | None = None,
     ) -> list[dict[str, Any]]:
-        params = {"category": "linear", "symbol": ALLOWED_SYMBOL, "limit": 100}
+        resolved_symbol = symbol or self._resolve_symbol(client_order_id, order_id)
+        self._require_symbol(resolved_symbol)
+        params = {"category": "linear", "symbol": resolved_symbol, "limit": 100}
         if order_id:
             params["orderId"] = order_id
         if client_order_id:
@@ -617,7 +725,7 @@ class BybitV5OrderGateway:
                 "orderLinkId": client_order_id,
             },
             symbol=symbol,
-            quantity=ALLOWED_QUANTITY,
+            quantity=self._approved_quantity(client_order_id),
             client_order_id=client_order_id,
             risk_reducing=risk_reducing,
         )
@@ -633,7 +741,11 @@ class BybitV5OrderGateway:
         )
 
     async def set_leverage(
-        self, symbol: str, leverage: Decimal, client_order_id: str
+        self,
+        symbol: str,
+        leverage: Decimal,
+        client_order_id: str,
+        quantity: Decimal | None = None,
     ) -> None:
         if leverage != Decimal("1"):
             raise ControlledLiveBlocked("Only 1x leverage is allowed")
@@ -647,7 +759,7 @@ class BybitV5OrderGateway:
                 "sellLeverage": "1",
             },
             symbol=symbol,
-            quantity=ALLOWED_QUANTITY,
+            quantity=quantity or self._approved_quantity(client_order_id),
             client_order_id=client_order_id,
         )
 
@@ -662,6 +774,16 @@ class BybitV5OrderGateway:
     ) -> None:
         if not reduce_only or stop_loss <= 0 or take_profit <= 0:
             raise ControlledLiveBlocked("Full-position reduce-only TP/SL is required")
+        if isinstance(self._authorizer, ProductionMutationGuard):
+            approved, _ = self._authorizer.approved_preview(client_order_id)
+            if (
+                _decimal(approved.get("stop_loss")) != stop_loss
+                or _decimal(approved.get("take_profit")) != take_profit
+                or str(approved.get("symbol") or "") != symbol
+            ):
+                raise ControlledLiveBlocked(
+                    "Native TP/SL does not match the exact approved proposal"
+                )
         await self._mutate(
             "PROTECTION",
             "/v5/position/trading-stop",
@@ -676,7 +798,7 @@ class BybitV5OrderGateway:
                 "slOrderType": "Market",
             },
             symbol=symbol,
-            quantity=ALLOWED_QUANTITY,
+            quantity=self._approved_quantity(client_order_id),
             client_order_id=client_order_id,
             risk_reducing=True,
         )
@@ -762,9 +884,10 @@ class BybitV5OrderGateway:
         return cancelled
 
     async def reconcile_client_order_id(self, client_order_id: str) -> dict[str, Any]:
-        order = await self.query_order(client_order_id=client_order_id)
-        fills = await self.query_executions(client_order_id=client_order_id)
-        position = await self.read_position(ALLOWED_SYMBOL)
+        symbol = self._resolve_symbol(client_order_id, None)
+        order = await self.query_order(client_order_id=client_order_id, symbol=symbol)
+        fills = await self.query_executions(client_order_id=client_order_id, symbol=symbol)
+        position = await self.read_position(symbol)
         return {
             "status": "MATCH" if order or fills else "NOT_FOUND",
             "order": order,
@@ -775,35 +898,35 @@ class BybitV5OrderGateway:
 
     async def snapshot(self) -> LiveGatewaySnapshot:
         positions_result = await self._http.private_get(
-            "/v5/position/list", {"category": "linear", "symbol": ALLOWED_SYMBOL}
+            "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}
         )
         orders_result = await self._http.private_get(
             "/v5/order/realtime",
-            {"category": "linear", "symbol": ALLOWED_SYMBOL, "openOnly": 0, "limit": 50},
+            {"category": "linear", "settleCoin": "USDT", "openOnly": 0, "limit": 50},
         )
         fills_result = await self._http.private_get(
-            "/v5/execution/list", {"category": "linear", "symbol": ALLOWED_SYMBOL, "limit": 100}
+            "/v5/execution/list", {"category": "linear", "limit": 100}
         )
         positions = tuple(
             LivePositionSnapshot(
-                f"{ALLOWED_SYMBOL}:{item.get('positionIdx') or 0}",
-                ALLOWED_SYMBOL,
+                f"{item.get('symbol')}:{item.get('positionIdx') or 0}",
+                str(item.get("symbol")),
                 _decimal(item.get("size")),
             )
             for item in positions_result.get("list") or []
-            if _decimal(item.get("size")) > 0
+            if _decimal(item.get("size")) > 0 and item.get("symbol") in ALLOWED_SYMBOLS
         )
         return LiveGatewaySnapshot(
             positions,
             frozenset(
                 str(item.get("orderId"))
                 for item in orders_result.get("list") or []
-                if item.get("orderId")
+                if item.get("orderId") and item.get("symbol") in ALLOWED_SYMBOLS
             ),
             frozenset(
                 str(item.get("orderId"))
                 for item in fills_result.get("list") or []
-                if item.get("orderId")
+                if item.get("orderId") and item.get("symbol") in ALLOWED_SYMBOLS
             ),
         )
 
@@ -841,16 +964,41 @@ class BybitV5OrderGateway:
         self._order_context[order_id] = client_id
         return client_id
 
+    def _resolve_symbol(
+        self, client_order_id: str | None, order_id: str | None
+    ) -> str:
+        client_id = client_order_id
+        if client_id is None and order_id is not None:
+            client_id = self._order_context.get(order_id)
+        if client_id and client_id in self._proposal_context:
+            return self._proposal_context[client_id][0]
+        if client_id and isinstance(self._authorizer, ProductionMutationGuard):
+            symbol, quantity = self._authorizer.approved_request(client_id)
+            self._proposal_context[client_id] = (symbol, quantity)
+            return symbol
+        # Backward-compatible read-only default. Every mutation still passes
+        # through ProductionMutationGuard and cannot rely on this fallback.
+        return ALLOWED_SYMBOL
+
+    def _approved_quantity(self, client_order_id: str) -> Decimal:
+        if client_order_id in self._proposal_context:
+            return self._proposal_context[client_order_id][1]
+        if isinstance(self._authorizer, ProductionMutationGuard):
+            symbol, quantity = self._authorizer.approved_request(client_order_id)
+            self._proposal_context[client_order_id] = (symbol, quantity)
+            return quantity
+        return Decimal("0.1")
+
     @staticmethod
     def _market_payload(
         preview: ManualExecutionPreview, client_order_id: str
     ) -> dict[str, Any]:
         return {
             "category": "linear",
-            "symbol": ALLOWED_SYMBOL,
+            "symbol": preview.symbol,
             "side": "Buy" if preview.side == "BUY" else "Sell",
             "orderType": "Market",
-            "qty": "0.1",
+            "qty": _number(preview.quantity),
             "timeInForce": "IOC",
             "positionIdx": 0,
             "reduceOnly": False,
@@ -858,24 +1006,42 @@ class BybitV5OrderGateway:
             "orderLinkId": client_order_id,
         }
 
-    @staticmethod
-    def _validate_preview(preview: ManualExecutionPreview, client_order_id: str) -> None:
+    def _validate_preview(
+        self, preview: ManualExecutionPreview, client_order_id: str
+    ) -> None:
         if (
-            preview.symbol != ALLOWED_SYMBOL
-            or preview.quantity != ALLOWED_QUANTITY
+            preview.symbol not in ALLOWED_SYMBOLS
+            or preview.quantity <= 0
             or preview.leverage != Decimal("1")
             or preview.expected_notional > MAX_NOTIONAL
             or preview.side not in {"BUY", "SELL"}
             or not preview.executable
+            or preview.selection_hash
+            not in {
+                scanner_selection_hash(preview.symbol),
+                *(
+                    (CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.selection_hash,)
+                    if preview.symbol == CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.symbol
+                    else ()
+                ),
+            }
         ):
             raise ControlledLiveBlocked("Preview violates CONTROLLED_LIVE_V1 production limits")
         if client_order_id != preview.client_order_id or len(client_order_id) > 36:
             raise ControlledLiveBlocked("Invalid deterministic Bybit client order ID")
+        if isinstance(self._authorizer, ProductionMutationGuard):
+            _, approved_hash = self._authorizer.approved_preview(client_order_id)
+            if approved_hash != preview.proposal_hash:
+                raise ControlledLiveBlocked(
+                    "Request preview does not match the exact persistent approval"
+                )
 
     @staticmethod
     def _require_symbol(symbol: str) -> None:
-        if symbol != ALLOWED_SYMBOL:
-            raise ControlledLiveBlocked("Only SOLUSDT LinearPerpetual is allowed")
+        if symbol not in ALLOWED_SYMBOLS:
+            raise ControlledLiveBlocked(
+                "Symbol is not in CONTROLLED_LIVE_MULTI_SYMBOL_V1"
+            )
 
 
 def _clean(values: dict[str, Any]) -> dict[str, str]:
@@ -896,6 +1062,40 @@ def _json_body(payload: dict[str, Any]) -> str:
 
 def _decimal(value: Any) -> Decimal:
     return Decimal(str(value or "0"))
+
+
+def _ceil_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        return Decimal()
+    return (value / step).to_integral_value(rounding=ROUND_CEILING) * step
+
+
+def _closed_order_results(
+    executions: list[dict[str, Any]],
+) -> list[tuple[str, Decimal, datetime]]:
+    totals: dict[str, Decimal] = {}
+    times: dict[str, datetime] = {}
+    for item in executions:
+        realized = _decimal(item.get("execPnl"))
+        if realized == 0:
+            continue
+        order_id = str(item.get("orderId") or item.get("execId") or "")
+        raw_time = item.get("execTime")
+        if not order_id or raw_time in (None, ""):
+            continue
+        try:
+            closed_at = datetime.fromtimestamp(int(raw_time) / 1000, tz=UTC)
+        except (TypeError, ValueError, OSError):
+            continue
+        totals[order_id] = totals.get(order_id, Decimal()) + realized - abs(
+            _decimal(item.get("execFee"))
+        )
+        times[order_id] = max(times.get(order_id, closed_at), closed_at)
+    return sorted(
+        ((order_id, pnl, times[order_id]) for order_id, pnl in totals.items()),
+        key=lambda item: item[2],
+        reverse=True,
+    )
 
 
 def _utc_day_start_ms() -> int:

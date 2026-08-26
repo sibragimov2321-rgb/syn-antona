@@ -26,6 +26,12 @@ from app.db import (
 )
 from app.exchanges.models import InstrumentRules, OrderSide
 from app.trading.execution_store import OrderRejected
+from app.trading.controlled_universe import (
+    ALLOWED_SCANNER_SYMBOLS,
+    FROZEN_SIGNAL_SOURCE,
+    internal_symbol,
+    scanner_selection_hash,
+)
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1.json"
@@ -412,7 +418,7 @@ class ControlledLiveRepository:
                     proposal_hash=preview.proposal_hash,
                     profile_name=self.profile.name,
                     profile_hash=self.profile.config_hash,
-                    selection_hash=self.instrument.selection_hash,
+                    selection_hash=preview.selection_hash,
                     admin_telegram_id=admin_id,
                     source=preview.source,
                     preview_json=json.dumps(preview.safe_dict(), sort_keys=True),
@@ -434,7 +440,8 @@ class ControlledLiveRepository:
             if record is None or record.admin_telegram_id != admin_id:
                 raise ControlledLiveBlocked("Proposal is missing or belongs to another admin")
             self._verify_hash(record.profile_hash)
-            self._verify_selection(self.instrument.symbol, record.selection_hash)
+            values = json.loads(record.preview_json)
+            self._verify_selection(str(values.get("symbol") or ""), record.selection_hash)
             if record.status != "PREVIEWED":
                 raise ControlledLiveBlocked("Proposal is not awaiting approval")
             record.status = "APPROVED"
@@ -448,7 +455,8 @@ class ControlledLiveRepository:
             if record is None or record.admin_telegram_id != admin_id:
                 raise ControlledLiveBlocked("Proposal is missing or belongs to another admin")
             self._verify_hash(record.profile_hash)
-            self._verify_selection(self.instrument.symbol, record.selection_hash)
+            values = json.loads(record.preview_json)
+            self._verify_selection(str(values.get("symbol") or ""), record.selection_hash)
             if record.status not in {"PREVIEWED", "APPROVED"}:
                 raise ControlledLiveBlocked("Proposal can no longer be cancelled")
             record.status = "CANCELLED"
@@ -465,7 +473,7 @@ class ControlledLiveRepository:
                 raise ControlledLiveBlocked("Approved persistent proposal/state is missing")
             self._verify_hash(record.profile_hash)
             self._verify_hash(state.profile_hash)
-            self._verify_selection(self.instrument.symbol, record.selection_hash)
+            self._verify_selection(preview.symbol, record.selection_hash)
             self._verify_selection(state.first_symbol, state.selection_hash)
             if state.first_order_in_progress or state.first_order_executed:
                 raise ControlledLiveBlocked("First Mainnet order was already claimed or executed")
@@ -483,7 +491,11 @@ class ControlledLiveRepository:
                     exchange="bybit",
                     account_id=account_id,
                     client_order_id=preview.client_order_id,
-                    symbol=self.instrument.internal_symbol,
+                    symbol=(
+                        internal_symbol(preview.symbol)
+                        if preview.symbol in ALLOWED_SCANNER_SYMBOLS
+                        else self.instrument.internal_symbol
+                    ),
                     side=preview.side,
                     quantity=preview.quantity,
                     request_hash=preview.proposal_hash,
@@ -611,11 +623,16 @@ class ControlledLiveRepository:
             raise ControlledLiveBlocked("CONTROLLED_LIVE_V1 profile hash mismatch")
 
     def _verify_selection(self, symbol: str, selection_hash: str) -> None:
-        if (
-            symbol != self.instrument.symbol
-            or selection_hash != self.instrument.selection_hash
-        ):
-            raise ControlledLiveBlocked("CONTROLLED_LIVE_V1 first-instrument mismatch")
+        legacy = (
+            symbol == self.instrument.symbol
+            and selection_hash == self.instrument.selection_hash
+        )
+        scanner = (
+            symbol in ALLOWED_SCANNER_SYMBOLS
+            and selection_hash == scanner_selection_hash(symbol)
+        )
+        if not legacy and not scanner:
+            raise ControlledLiveBlocked("Controlled-live instrument selection mismatch")
 
 
 @dataclass(frozen=True)
@@ -743,11 +760,15 @@ class ManualExecutionService:
     ) -> LiveFill:
         self._require_admin(admin_id)
         (gates or ArmingGates.from_environment()).require_all(
-            expected_symbol=self.instrument.symbol
+            expected_symbol=preview.symbol
         )
-        if preview.source != MANUAL_SOURCE:
-            raise ControlledLiveBlocked("Strategy and AI cannot submit the first Mainnet order")
-        current = await self.gateway.current_instrument_state(self.instrument.symbol)
+        if preview.source not in {MANUAL_SOURCE, FROZEN_SIGNAL_SOURCE}:
+            raise ControlledLiveBlocked(
+                "Strategy and AI cannot submit directly; only an admin-approved frozen signal may execute"
+            )
+        if preview.source == FROZEN_SIGNAL_SOURCE:
+            self.repository._verify_selection(preview.symbol, preview.selection_hash)
+        current = await self.gateway.current_instrument_state(preview.symbol)
         self._validate_current_instrument(preview, current)
         if getattr(self.gateway, "dry_run", False):
             prepare = getattr(self.gateway, "dry_run_market_request", None)
@@ -775,7 +796,7 @@ class ManualExecutionService:
         try:
             await self.gateway.install_native_protection(
                 fill,
-                symbol=self.instrument.symbol,
+                symbol=preview.symbol,
                 stop_loss=preview.stop_loss,
                 take_profit=preview.take_profit,
                 reduce_only=True,
@@ -783,7 +804,7 @@ class ManualExecutionService:
         except Exception as protection_error:
             try:
                 await self.gateway.emergency_close_reduce_only(
-                    fill, self.instrument.symbol
+                    fill, preview.symbol
                 )
             except Exception as close_error:
                 self.repository.mark_unknown(preview, close_error)
@@ -800,12 +821,17 @@ class ManualExecutionService:
     async def emergency_stop(self, admin_id: int, *, close_position: bool) -> dict[str, Any]:
         self._require_admin(admin_id)
         self.repository.activate_kill_switch()
-        cancelled = await self.gateway.cancel_pending_orders(self.instrument.symbol)
+        snapshot = await self.gateway.snapshot()
+        cancelled = 0
+        active_symbols = {self.instrument.symbol} | {
+            item.symbol for item in snapshot.positions if item.symbol in ALLOWED_SCANNER_SYMBOLS
+        }
+        for symbol in sorted(active_symbols):
+            cancelled += await self.gateway.cancel_pending_orders(symbol)
         closed = 0
         if close_position:
-            snapshot = await self.gateway.snapshot()
             for position in snapshot.positions:
-                if position.symbol != self.instrument.symbol:
+                if position.symbol not in ALLOWED_SCANNER_SYMBOLS:
                     continue
                 fill = LiveFill(
                     order_id="emergency",
@@ -815,7 +841,7 @@ class ManualExecutionService:
                     fee=Decimal(),
                 )
                 await self.gateway.emergency_close_reduce_only(
-                    fill, self.instrument.symbol
+                    fill, position.symbol
                 )
                 closed += 1
         return {"kill_switch": "ACTIVE", "cancelled_orders": cancelled, "closed_positions": closed}
@@ -829,7 +855,7 @@ class ManualExecutionService:
             fill_match = bool(record.exchange_order_id) and record.exchange_order_id in snapshot.fill_order_ids
             position_match = any(
                 item.position_id == record.position_id
-                and item.symbol == self.instrument.symbol
+                and item.symbol == preview.symbol
                 and item.quantity == preview.quantity
                 for item in snapshot.positions
             )
@@ -855,7 +881,7 @@ class ManualExecutionService:
         preview: ManualExecutionPreview,
         current: CurrentInstrumentState,
     ) -> None:
-        if current.symbol != self.instrument.symbol or current.status != "Trading":
+        if current.symbol != preview.symbol or current.status != "Trading":
             raise ControlledLiveBlocked("Selected USDT perpetual is not currently available")
         if current.quantity_step <= 0 or preview.quantity % current.quantity_step != 0:
             raise ControlledLiveBlocked("Quantity no longer matches the current instrument step")
@@ -869,5 +895,5 @@ class ManualExecutionService:
             raise ControlledLiveBlocked(
                 "Current minimum order notional is outside the immutable $5-$10 range"
             )
-        if preview.quantity * current.ask_price > self.instrument.first_order_notional_cap:
+        if preview.quantity * current.ask_price > CONTROLLED_LIVE_V1.max_position_notional:
             raise ControlledLiveBlocked("Current ask price exceeds the first-order notional cap")

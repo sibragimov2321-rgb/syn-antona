@@ -27,15 +27,108 @@ from app.shadow.signal_wait_status import (
 from app.shadow.status import snapshot_metrics
 from app.shadow.warmup_bundle import load_warmup_bundle
 from app.strategy_lab.phase4g import EXCHANGES
-from app.trading.controlled_live import ControlledLiveRepository
+from app.trading.controlled_live import (
+    ArmingGates,
+    ControlledLiveRepository,
+    ManualExecutionService,
+    ReconciliationRequired,
+)
 from app.trading.first_live_proposal import (
-    FirstControlledLiveProposalCoordinator,
     FirstLiveProposalRepository,
     format_controlled_proposal_ru,
+    preview_from_record,
+)
+from app.trading.multi_symbol_scanner import (
+    BybitMultiSymbolReadOnlyReader,
+    MultiSymbolFirstProposalCoordinator,
+    MultiSymbolScannerRepository,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _controlled_execution_cycle(
+    phase_repository: FirstLiveProposalRepository,
+    controlled_repository: ControlledLiveRepository,
+    gateway: BybitV5OrderGateway,
+    notifier: ShadowNotifier,
+    admin_ids: set[int],
+    process_started_at: datetime,
+) -> None:
+    """Execute only an exact, persisted admin approval after all env gates arm."""
+    state = phase_repository.state()
+    if not state.proposal_id:
+        return
+    record = phase_repository.proposal(state.proposal_id)
+    preview = preview_from_record(record)
+    if record is None or preview is None:
+        return
+    service = ManualExecutionService(controlled_repository, gateway, admin_ids)
+    if state.status == "EXECUTED_AWAITING_RESTART_VALIDATION":
+        state_updated = (
+            state.updated_at.replace(tzinfo=UTC)
+            if state.updated_at.tzinfo is None
+            else state.updated_at
+        )
+        if process_started_at <= state_updated:
+            return
+        reconciliation = await service.reconcile(preview)
+        if reconciliation.get("status") == "MATCH":
+            phase_repository.mark_execution_status("FIRST_EXECUTION_VALIDATED")
+            await notifier.system(
+                "CONTROLLED LIVE RESTART RECOVERY",
+                "Первая позиция восстановлена после restart; ledger/position reconciliation MATCH.",
+            )
+        else:
+            controlled_repository.activate_kill_switch()
+            phase_repository.mark_execution_status(
+                "HALTED_RECONCILIATION_MISMATCH", json.dumps(reconciliation, default=str)
+            )
+            await notifier.system(
+                "CONTROLLED LIVE HALTED",
+                "Reconciliation после restart не совпал. Новые сделки запрещены.",
+            )
+        return
+    if state.status != "APPROVED_FOR_EXECUTION":
+        return
+    settings = get_settings()
+    gates = ArmingGates.from_environment()
+    if settings.dry_run:
+        return
+    try:
+        gates.require_all(expected_symbol=preview.symbol)
+        fill = await service.execute_first_order(
+            record.admin_telegram_id,
+            preview,
+            account_id="bybit-mainnet-unified",
+            gates=gates,
+        )
+        reconciliation = None
+        for _ in range(3):
+            reconciliation = await service.reconcile(preview)
+            if reconciliation.get("status") == "MATCH":
+                break
+            await asyncio.sleep(0.5)
+        if reconciliation is None or reconciliation.get("status") != "MATCH":
+            raise ReconciliationRequired("Immediate post-fill reconciliation mismatch")
+        phase_repository.mark_execution_status(
+            "EXECUTED_AWAITING_RESTART_VALIDATION"
+        )
+        await notifier.system(
+            "CONTROLLED LIVE FIRST EXECUTION",
+            f"{preview.symbol}: fill {fill.filled_quantity}; native SL/TP установлены; "
+            "reconciliation MATCH. Требуется Railway restart validation.",
+        )
+    except Exception as error:
+        controlled_repository.activate_kill_switch()
+        phase_repository.mark_execution_status(
+            "HALTED_EXECUTION_FAILURE", f"{type(error).__name__}: {error}"
+        )
+        await notifier.system(
+            "CONTROLLED LIVE HALTED",
+            f"{type(error).__name__}: новые сделки запрещены; требуется ручная проверка.",
+        )
 
 
 async def _notify_event(
@@ -151,6 +244,7 @@ async def _send_pending_daily_report(
 async def run(arguments) -> None:
     settings = get_settings()
     settings.assert_safe_runtime()
+    process_started_at = datetime.now(UTC)
     project_root = Path(__file__).resolve().parents[2]
     repository = ShadowRepository()
     market = PublicLiveMarketData(EXCHANGES)
@@ -173,9 +267,11 @@ async def run(arguments) -> None:
                 # Windows event loops and embedded runtimes may not expose signal handlers.
                 break
     lease_acquired = False
-    proposal_gateway = None
     proposal_repository = FirstLiveProposalRepository(SessionLocal)
     proposal_coordinator = None
+    scanner_repository = MultiSymbolScannerRepository(SessionLocal)
+    controlled_repository = ControlledLiveRepository(SessionLocal)
+    execution_gateway = None
     signal_wait_service = None
     try:
         repository.ping()
@@ -202,12 +298,16 @@ async def run(arguments) -> None:
         # Persist the prospective cut-off before looking for a signal. Existing
         # shadow decisions are intentionally ineligible for Phase 5E.
         proposal_repository.initialize()
-        ControlledLiveRepository(SessionLocal).state()
+        # This is an operational prospective cursor, not a new trading experiment.
+        # It is created once before scanning and hash-verified on every restart.
+        scanner_repository.initialize()
+        controlled_repository.state()
         if os.getenv("BYBIT_API_KEY") and os.getenv("BYBIT_API_SECRET"):
-            proposal_gateway = BybitV5OrderGateway.from_environment(SessionLocal)
-            proposal_coordinator = FirstControlledLiveProposalCoordinator(
+            execution_gateway = BybitV5OrderGateway.from_environment(SessionLocal)
+            proposal_coordinator = MultiSymbolFirstProposalCoordinator(
+                scanner_repository,
                 proposal_repository,
-                proposal_gateway,
+                BybitMultiSymbolReadOnlyReader.from_environment(),
                 settings.admin_telegram_ids,
             )
             signal_wait_service = SignalWaitStatusService(
@@ -295,8 +395,13 @@ async def run(arguments) -> None:
                 "health": startup_health,
                 "recovery": recovery,
                 "orphan_decisions_repaired": orphan_decisions,
-                "live_trading_enabled": False,
-                "real_orders_allowed": False,
+                "live_trading_enabled": settings.live_trading_enabled,
+                "real_orders_allowed": bool(
+                    settings.live_trading_enabled
+                    and settings.controlled_live_enabled
+                    and settings.manual_first_order_approved
+                    and not settings.dry_run
+                ),
             },
         )
 
@@ -333,6 +438,15 @@ async def run(arguments) -> None:
                         "reason": proposal_result.reason,
                         "real_orders_sent": 0,
                     },
+                )
+            if execution_gateway is not None:
+                await _controlled_execution_cycle(
+                    proposal_repository,
+                    controlled_repository,
+                    execution_gateway,
+                    notifier,
+                    settings.admin_telegram_ids,
+                    process_started_at,
                 )
             await notifier.deliver_pending()
             cycles += 1
@@ -457,8 +571,10 @@ async def run(arguments) -> None:
         for shutdown_signal in installed_signals:
             loop.remove_signal_handler(shutdown_signal)
         await notifier.close()
-        if proposal_gateway is not None:
-            await proposal_gateway.close()
+        if proposal_coordinator is not None:
+            await proposal_coordinator.close()
+        if execution_gateway is not None:
+            await execution_gateway.close()
         if signal_wait_service is not None:
             await signal_wait_service.close()
         await market.close()
