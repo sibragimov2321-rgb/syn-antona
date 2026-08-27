@@ -27,8 +27,11 @@ class Settings(BaseSettings):
     shadow_quote_stale_seconds: int = 30
     shadow_live_candle_grace_seconds: int = 180
     shadow_offline_after_failures: int = 3
-    shadow_lease_seconds: int = 300
-    shadow_heartbeat_max_age_seconds: int = 300
+    # A full 1H multi-exchange cycle can legitimately exceed five minutes.
+    # Keep one bounded 15-minute watchdog window so a healthy long cycle is
+    # not killed while a genuinely stuck process is still restarted.
+    shadow_lease_seconds: int = 900
+    shadow_heartbeat_max_age_seconds: int = 900
     shadow_api_timeout_ms: int = 15_000
 
     def assert_safe_runtime(self) -> None:

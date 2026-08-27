@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 import json
 
+from app.core.config import get_settings
 from app.shadow.engine import PROTOCOL_ID
 from app.shadow.repository import ShadowRepository
 
@@ -13,12 +14,13 @@ def _utc(value: datetime | None) -> datetime | None:
 
 def execution_runtime_status(state, now: datetime | None = None) -> dict:
     current = now or datetime.now(UTC)
+    heartbeat_max_age = get_settings().shadow_heartbeat_max_age_seconds
     heartbeat = _utc(state.heartbeat_at) if state else None
     shadow_active = bool(
         state
         and state.status in {"STARTING", "RUNNING", "DEGRADED"}
         and heartbeat
-        and (current - heartbeat).total_seconds() <= 300
+        and (current - heartbeat).total_seconds() <= heartbeat_max_age
     )
     dry_run = state.dry_run if state else None
     live = state.live_trading_enabled if state else None

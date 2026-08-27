@@ -21,10 +21,23 @@ NEW_SCANNER_HASH = "dca304642a055cea080adf7da2e74104195e8c54aacd6864a55e41ecc91e
 
 
 def upgrade() -> None:
-    op.add_column(
-        "signal_wait_runtime",
-        sa.Column("open_planned_risk", sa.Numeric(24, 10), nullable=True),
-    )
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        # Railway starts the same pre-deploy migration for shadow and Telegram.
+        # PostgreSQL must tolerate both services reaching this DDL concurrently.
+        op.execute(
+            sa.text(
+                "ALTER TABLE signal_wait_runtime "
+                "ADD COLUMN IF NOT EXISTS open_planned_risk NUMERIC(24, 10)"
+            )
+        )
+    elif "open_planned_risk" not in {
+        column["name"] for column in sa.inspect(bind).get_columns("signal_wait_runtime")
+    }:
+        op.add_column(
+            "signal_wait_runtime",
+            sa.Column("open_planned_risk", sa.Numeric(24, 10), nullable=True),
+        )
     controlled = sa.table(
         "controlled_live_state",
         sa.column("profile_hash", sa.String()),

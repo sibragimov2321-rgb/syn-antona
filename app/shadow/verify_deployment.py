@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
+from app.core.config import get_settings
 from app.shadow.engine import PROTOCOL_ID
 from app.shadow.repository import ShadowRepository
 from app.shadow.watchdog import check_health
@@ -109,10 +110,11 @@ def verify_deployment(
     )
     if require_new_candle and (not latest_close or latest_close <= baseline_close):
         failures.append("no new closed 1h candle after PostgreSQL resume")
+    settings = get_settings()
     health = check_health(
         repository,
         protocol_lock,
-        heartbeat_max_age=300,
+        heartbeat_max_age=settings.shadow_heartbeat_max_age_seconds,
         quote_max_age=300,
         candle_max_age=7500,
     )
