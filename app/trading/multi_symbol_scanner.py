@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
+from html import escape
 import json
 import os
 from typing import Any
@@ -1003,7 +1004,9 @@ def format_scanner_status_ru(status: MultiSymbolScannerStatus) -> str:
         lines.append(
             f"{short} — score {item.signal_score} — {item.status}"
         )
-        lines.append(f"  Причина pipeline: {item.reason or 'не сохранена'}")
+        lines.append(
+            f"  Причина pipeline: {escape(item.reason or 'не сохранена')}"
+        )
     lines.extend(
         [
             "",
@@ -1051,7 +1054,7 @@ def format_scanner_wait_reasons_ru(status: MultiSymbolScannerStatus) -> str:
         for item in waiting:
             lines.append(
                 f"• {item.symbol}: {item.status}, score {item.signal_score} — "
-                f"{item.reason or 'причина не сохранена'}"
+                f"{escape(item.reason or 'причина не сохранена')}"
             )
     lines.extend(
         [

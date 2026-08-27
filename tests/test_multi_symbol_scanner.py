@@ -589,6 +589,9 @@ def test_status_lists_exact_allowlist_and_uses_persisted_decisions_only():
         "0",
         "0",
     )
+    with sessions.begin() as session:
+        decision = session.get(ShadowDecisionRecord, "SOLUSDT-WAIT-61")
+        decision.risk_reason = "R/R < 1.5 & Risk Manager WAIT"
     value = scanner_status(sessions)
     text = format_scanner_status_ru(value)
     reasons = format_scanner_wait_reasons_ru(value)
@@ -612,6 +615,8 @@ def test_status_lists_exact_allowlist_and_uses_persisted_decisions_only():
     assert value.remaining_daily_loss == Decimal("5")
     assert value.remaining_experiment_loss == Decimal("10")
     assert "SOLUSDT: WAIT, score 61" in reasons
+    assert "R/R &lt; 1.5 &amp; Risk Manager WAIT" in text
+    assert "R/R &lt; 1.5 &amp; Risk Manager WAIT" in reasons
 
 
 class AllowAuthorizer:
