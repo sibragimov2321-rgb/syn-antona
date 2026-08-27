@@ -48,6 +48,55 @@ from app.trading.multi_symbol_scanner import (
 logger = logging.getLogger(__name__)
 
 
+async def _wait_for_collector_lease(
+    repository: ShadowRepository,
+    instance_id: str,
+    host: str,
+    pid: int,
+    lease_seconds: int,
+    *,
+    poll_seconds: float = 5.0,
+) -> int:
+    """Wait as a passive standby during Railway's rolling container handoff.
+
+    A busy lease is an expected deployment state, not a collector crash. Only the
+    lease owner may proceed to scanner, notifier, or execution initialization.
+    """
+    wait_logged = False
+    while True:
+        acquired, restart_count = repository.acquire_collector_lease(
+            PROTOCOL_ID,
+            instance_id,
+            host,
+            pid,
+            datetime.now(UTC),
+            lease_seconds,
+        )
+        if acquired:
+            if wait_logged:
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "collector_lease_handoff_complete",
+                    {"instance_id": instance_id},
+                )
+            return restart_count
+        if not wait_logged:
+            state = repository.collector_state(PROTOCOL_ID)
+            log_event(
+                logger,
+                logging.INFO,
+                "collector_lease_standby",
+                {
+                    "instance_id": instance_id,
+                    "active_instance_id": state.instance_id if state else None,
+                    "reason": "waiting for graceful Railway deployment handoff",
+                },
+            )
+            wait_logged = True
+        await asyncio.sleep(poll_seconds)
+
+
 async def _controlled_execution_cycle(
     phase_repository: FirstLiveProposalRepository,
     controlled_repository: ControlledLiveRepository,
@@ -305,11 +354,28 @@ async def run(arguments) -> None:
         protocol = verify_existing_lock(
             arguments.protocol_lock, repository, project_root, warmups
         )
-        # Persist the prospective cut-off before looking for a signal. Existing
-        # shadow decisions are intentionally ineligible for Phase 5E.
+        restart_count = await _wait_for_collector_lease(
+            repository,
+            instance_id,
+            socket.gethostname(),
+            os.getpid(),
+            settings.shadow_lease_seconds,
+        )
+        lease_acquired = True
+        repository.record_collector_runtime(
+            PROTOCOL_ID,
+            instance_id,
+            dry_run=settings.dry_run,
+            live_trading_enabled=settings.live_trading_enabled,
+            controlled_live_enabled=settings.controlled_live_enabled,
+            manual_first_order_approved=settings.manual_first_order_approved,
+            deployment_id=os.getenv("RAILWAY_DEPLOYMENT_ID"),
+            replica_id=os.getenv("RAILWAY_REPLICA_ID"),
+            now=datetime.now(UTC),
+        )
+        # Only the active lease owner may initialize scanner/execution services.
+        # A rolling-deploy standby remains a passive protocol/lease verifier.
         proposal_repository.initialize()
-        # This is an operational prospective cursor, not a new trading experiment.
-        # It is created once before scanning and hash-verified on every restart.
         scanner_repository.initialize()
         controlled_repository.state()
         if os.getenv("BYBIT_API_KEY") and os.getenv("BYBIT_API_SECRET"):
@@ -329,17 +395,6 @@ async def run(arguments) -> None:
             PROTOCOL_ID, protocol["strategy_config_hash"]
         )
         await notifier.deliver_pending()
-        acquired, restart_count = repository.acquire_collector_lease(
-            PROTOCOL_ID,
-            instance_id,
-            socket.gethostname(),
-            os.getpid(),
-            datetime.now(UTC),
-            settings.shadow_lease_seconds,
-        )
-        if not acquired:
-            raise RuntimeError("Another Shadow Collector holds the active database lease")
-        lease_acquired = True
         if restart_count:
             await _notify_event(
                 repository,

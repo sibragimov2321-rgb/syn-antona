@@ -5,5 +5,7 @@ dockerfilePath = "Dockerfile"
 [deploy]
 preDeployCommand = "python -m alembic upgrade head"
 startCommand = "python -m app.service_runner"
+overlapSeconds = 0
+drainingSeconds = 60
 restartPolicyType = "ALWAYS"
 restartPolicyMaxRetries = 10

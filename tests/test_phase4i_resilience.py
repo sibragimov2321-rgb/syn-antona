@@ -15,11 +15,11 @@ from app.shadow.market import PublicLiveMarketData
 from app.shadow.protocol import canonical_json, verify_existing_lock, warmup_hash
 from app.shadow.recovery import recover_after_downtime
 from app.shadow.repository import ShadowRepository
-from app.shadow.status import system_status
+from app.shadow.status import system_status, telegram_system_status
 from app.shadow.transfer import transfer_runtime
 from app.shadow.watchdog import check_health
 from app.shadow.warmup_bundle import export_warmup_bundle, load_warmup_bundle
-from app.shadow.runner import _update_exchange_health
+from app.shadow.runner import _update_exchange_health, _wait_for_collector_lease
 from app.strategy_lab.phase4g import FROZEN_CONFIG_HASH
 
 
@@ -117,6 +117,65 @@ def test_collector_lease_survives_restart_and_blocks_second_instance() -> None:
     assert repository.acquire_collector_lease(PROTOCOL_ID, "b", "host", 2, now, 300)[0] is False
     repository.release_collector_lease(PROTOCOL_ID, "a", now + timedelta(seconds=1))
     assert repository.acquire_collector_lease(PROTOCOL_ID, "b", "host", 2, now + timedelta(seconds=2), 300) == (True, 1)
+
+
+@pytest.mark.asyncio
+async def test_rolling_deploy_waits_for_lease_without_collector_crash(monkeypatch) -> None:
+    repository = _repository()
+    now = datetime.now(UTC)
+    _save_protocol(repository, _protocol(now))
+    assert repository.acquire_collector_lease(
+        PROTOCOL_ID, "old", "host", 1, now, 300
+    )[0]
+    sleeps = 0
+
+    async def release_on_wait(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        repository.release_collector_lease(
+            PROTOCOL_ID, "old", datetime.now(UTC)
+        )
+
+    monkeypatch.setattr("app.shadow.runner.asyncio.sleep", release_on_wait)
+    restart_count = await _wait_for_collector_lease(
+        repository, "new", "host", 2, 300, poll_seconds=0
+    )
+
+    assert sleeps == 1
+    assert restart_count == 1
+    assert repository.collector_state(PROTOCOL_ID).instance_id == "new"
+
+
+def test_status_uses_runtime_flags_from_active_execution_lease() -> None:
+    repository = _repository()
+    now = datetime.now(UTC)
+    _save_protocol(repository, _protocol(now))
+    repository.acquire_collector_lease(PROTOCOL_ID, "active", "host", 1, now, 300)
+    repository.record_collector_runtime(
+        PROTOCOL_ID,
+        "active",
+        dry_run=False,
+        live_trading_enabled=True,
+        controlled_live_enabled=True,
+        manual_first_order_approved=True,
+        deployment_id="deployment-2",
+        replica_id="replica-1",
+        now=now,
+    )
+
+    status = system_status(repository, now)
+    runtime = status["execution_runtime"]
+    assert runtime["shadow"] == "ACTIVE"
+    assert runtime["controlled_live"] == "ARMED"
+    assert runtime["real_order_execution"] == "ENABLED"
+    assert status["live_trading"] == "ON"
+    text = telegram_system_status(repository)
+    assert "SHADOW: <b>ACTIVE</b>" in text
+    assert "CONTROLLED LIVE: <b>ARMED</b>" in text
+    assert "REAL ORDER EXECUTION: <b>ENABLED</b>" in text
+    assert "DRY_RUN=false" in text
+    assert "LIVE_TRADING_ENABLED=true" in text
+    assert "CONTROLLED_LIVE_ENABLED=true" in text
 
 
 def test_daily_snapshot_is_updated_not_duplicated() -> None:

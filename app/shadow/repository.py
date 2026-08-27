@@ -568,9 +568,55 @@ class ShadowRepository:
             record.last_db_write_at = now
             record.lease_expires_at = expires
             record.restart_count += 1
+            record.dry_run = None
+            record.live_trading_enabled = None
+            record.controlled_live_enabled = None
+            record.manual_first_order_approved = None
+            record.real_order_execution_enabled = None
             record.last_error = None
             record.updated_at = now
             return True, record.restart_count
+
+    def record_collector_runtime(
+        self,
+        protocol_id: str,
+        instance_id: str,
+        *,
+        dry_run: bool,
+        live_trading_enabled: bool,
+        controlled_live_enabled: bool,
+        manual_first_order_approved: bool,
+        deployment_id: str | None,
+        replica_id: str | None,
+        now: datetime,
+    ) -> None:
+        """Persist flags from the process that actually owns the execution lease."""
+        with self.session_factory.begin() as session:
+            record = session.get(ShadowCollectorStateRecord, protocol_id)
+            if not record or record.instance_id != instance_id:
+                raise RuntimeError("Collector lease lost before runtime flags were recorded")
+            previous_deployment = record.deployment_id
+            if deployment_id and previous_deployment != deployment_id:
+                start_cause = "RAILWAY_REDEPLOY"
+            elif previous_deployment == deployment_id and deployment_id:
+                start_cause = "PROCESS_RESTART"
+            else:
+                start_cause = "RUNTIME_START"
+            record.dry_run = dry_run
+            record.live_trading_enabled = live_trading_enabled
+            record.controlled_live_enabled = controlled_live_enabled
+            record.manual_first_order_approved = manual_first_order_approved
+            record.real_order_execution_enabled = bool(
+                not dry_run
+                and live_trading_enabled
+                and controlled_live_enabled
+                and manual_first_order_approved
+            )
+            record.deployment_id = deployment_id
+            record.replica_id = replica_id
+            record.last_start_cause = start_cause
+            record.last_db_write_at = now
+            record.updated_at = now
 
     def heartbeat(
         self,

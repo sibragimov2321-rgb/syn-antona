@@ -599,6 +599,20 @@ class ShadowCollectorStateRecord(Base):
     last_db_write_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     restart_count: Mapped[int] = mapped_column(Integer, default=0)
+    dry_run: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    live_trading_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    controlled_live_enabled: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True
+    )
+    manual_first_order_approved: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True
+    )
+    real_order_execution_enabled: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True
+    )
+    deployment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    replica_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_start_cause: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

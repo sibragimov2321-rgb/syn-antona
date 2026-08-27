@@ -29,12 +29,14 @@ from app.db import (
     MultiSymbolScannerInstrumentRecord,
     MultiSymbolScannerStateRecord,
     ShadowDecisionRecord,
+    ShadowCollectorStateRecord,
     ShadowTradeRecord,
     SignalWaitRuntimeRecord,
 )
 from app.exchanges.bybit_readonly import BybitMainnetReadOnlyClient
 from app.exchanges.models import InstrumentRules, OrderSide
 from app.shadow.engine import PROTOCOL_ID
+from app.shadow.status import execution_runtime_status
 from app.strategy_lab.phase4g import FROZEN_CONFIG_HASH, FROZEN_VERSION
 from app.trading.controlled_live import (
     CONTROLLED_LIVE_V1,
@@ -814,6 +816,12 @@ class MultiSymbolScannerStatus:
     daily_realized_pnl: Decimal | None
     remaining_daily_loss: Decimal | None
     remaining_experiment_loss: Decimal | None
+    shadow_runtime: str
+    controlled_live_runtime: str
+    real_order_execution_runtime: str
+    runtime_dry_run: bool | None
+    runtime_live_trading_enabled: bool | None
+    runtime_controlled_live_enabled: bool | None
 
 
 def scanner_status(session_factory: Callable[[], Session], now: datetime | None = None) -> MultiSymbolScannerStatus:
@@ -914,19 +922,35 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
         closest_symbols = tuple(
             item.symbol for item in eligible if item.signal_score == closest_score
         )
-        runtime = session.get(SignalWaitRuntimeRecord, CONTROLLED_LIVE_V1.name)
+        runtime_account = session.get(
+            SignalWaitRuntimeRecord, CONTROLLED_LIVE_V1.name
+        )
         controlled = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
-        equity = Decimal(runtime.equity) if runtime and runtime.equity is not None else None
-        positions = int(runtime.open_positions) if runtime and runtime.open_positions is not None else None
-        orders = int(runtime.open_orders) if runtime and runtime.open_orders is not None else None
+        collector = session.get(ShadowCollectorStateRecord, PROTOCOL_ID)
+        execution_runtime = execution_runtime_status(collector, current)
+        equity = (
+            Decimal(runtime_account.equity)
+            if runtime_account and runtime_account.equity is not None
+            else None
+        )
+        positions = (
+            int(runtime_account.open_positions)
+            if runtime_account and runtime_account.open_positions is not None
+            else None
+        )
+        orders = (
+            int(runtime_account.open_orders)
+            if runtime_account and runtime_account.open_orders is not None
+            else None
+        )
         trades_today = (
-            int(runtime.trades_today)
-            if runtime and runtime.trades_today is not None
+            int(runtime_account.trades_today)
+            if runtime_account and runtime_account.trades_today is not None
             else None
         )
         daily_pnl = (
-            Decimal(runtime.daily_realized_pnl)
-            if runtime and runtime.daily_realized_pnl is not None
+            Decimal(runtime_account.daily_realized_pnl)
+            if runtime_account and runtime_account.daily_realized_pnl is not None
             else None
         )
         day_start_equity = (
@@ -980,12 +1004,30 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
         daily_pnl,
         remaining_daily,
         remaining_experiment,
+        execution_runtime["shadow"],
+        execution_runtime["controlled_live"],
+        execution_runtime["real_order_execution"],
+        execution_runtime["dry_run"],
+        execution_runtime["live_trading_enabled"],
+        execution_runtime["controlled_live_enabled"],
     )
 
 
 def format_scanner_status_ru(status: MultiSymbolScannerStatus) -> str:
     lines = [
         "🟢 <b>CONTROLLED LIVE STATUS</b>",
+        "",
+        f"SHADOW: <b>{status.shadow_runtime}</b>",
+        f"CONTROLLED LIVE: <b>{status.controlled_live_runtime}</b>",
+        "REAL ORDER EXECUTION: "
+        f"<b>{status.real_order_execution_runtime}</b>",
+        "",
+        "Фактические flags execution-сервиса:",
+        f"DRY_RUN={_status_flag(status.runtime_dry_run)}",
+        "LIVE_TRADING_ENABLED="
+        f"{_status_flag(status.runtime_live_trading_enabled)}",
+        "CONTROLLED_LIVE_ENABLED="
+        f"{_status_flag(status.runtime_controlled_live_enabled)}",
         "",
         "Активные настройки:",
         f"Threshold: {CONTROLLED_LIVE_V1.signal_threshold}",
@@ -1085,6 +1127,12 @@ def _status_money(value: Decimal | None) -> str:
 
 def _status_number(value: int | None) -> str:
     return str(value) if value is not None else "НЕДОСТУПНО"
+
+
+def _status_flag(value: bool | None) -> str:
+    if value is None:
+        return "UNKNOWN"
+    return "true" if value else "false"
 
 
 def _compact_decimal(value: Decimal) -> str:
