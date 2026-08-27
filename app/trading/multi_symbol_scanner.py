@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db import (
+    ControlledLiveStateRecord,
     ControlledLiveProposalRecord,
     ExecutionOrderRecord,
     FirstLiveProposalStateRecord,
@@ -28,6 +29,7 @@ from app.db import (
     MultiSymbolScannerStateRecord,
     ShadowDecisionRecord,
     ShadowTradeRecord,
+    SignalWaitRuntimeRecord,
 )
 from app.exchanges.bybit_readonly import BybitMainnetReadOnlyClient
 from app.exchanges.models import InstrumentRules, OrderSide
@@ -377,6 +379,21 @@ class MultiSymbolScannerRepository:
             state.status = "RUNNING"
             state.last_error = None
             state.updated_at = snapshot.fetched_at
+            account = session.get(SignalWaitRuntimeRecord, CONTROLLED_LIVE_V1.name)
+            if account is None:
+                account = SignalWaitRuntimeRecord(
+                    profile_name=CONTROLLED_LIVE_V1.name,
+                    updated_at=snapshot.fetched_at,
+                )
+                session.add(account)
+            account.equity = snapshot.account.equity
+            account.open_positions = snapshot.account.open_positions
+            account.open_orders = len(snapshot.account.open_order_ids)
+            account.trades_today = snapshot.account.trades_today
+            account.daily_realized_pnl = snapshot.account.daily_realized_pnl
+            account.account_checked_at = snapshot.fetched_at
+            account.account_error = None
+            account.updated_at = snapshot.fetched_at
             for item in snapshot.instruments.values():
                 record = session.get(
                     MultiSymbolScannerInstrumentRecord, (PROFILE_NAME, item.symbol)
@@ -771,6 +788,7 @@ class ScannerSymbolStatus:
     signal_score: int
     reason: str
     candle_close: datetime | None
+    analyzed_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -784,6 +802,17 @@ class MultiSymbolScannerStatus:
     short_candidates: int
     risk_rejects: int
     best_candidate: str
+    closest_symbol: str
+    closest_score: int
+    score_gap: int
+    last_analysis: datetime | None
+    equity: Decimal | None
+    open_positions: int | None
+    open_orders: int | None
+    trades_today: int | None
+    daily_realized_pnl: Decimal | None
+    remaining_daily_loss: Decimal | None
+    remaining_experiment_loss: Decimal | None
 
 
 def scanner_status(session_factory: Callable[[], Session], now: datetime | None = None) -> MultiSymbolScannerStatus:
@@ -797,6 +826,7 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
     instruments = repository.instruments()
     statuses = []
     latest_close = None
+    last_analysis = None
     with session_factory() as session:
         daily_filters = [
             ShadowDecisionRecord.protocol_id == PROTOCOL_ID,
@@ -830,11 +860,20 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
             elif decision.decision in {"LONG", "SHORT"} and decision.risk_status == "REJECT":
                 status, reason, score = "RISK REJECT", decision.risk_reason, int(decision.signal_score)
             else:
-                status, reason, score = decision.decision, decision.risk_reason, int(decision.signal_score)
+                status = decision.decision
+                reason = _persisted_decision_reason(decision)
+                score = int(decision.signal_score)
             close_time = _aware(decision.signal_timestamp) if decision else None
+            analyzed_at = _aware(decision.created_at) if decision else None
             if close_time and (latest_close is None or close_time > latest_close):
                 latest_close = close_time
-            statuses.append(ScannerSymbolStatus(symbol, status, score, reason, close_time))
+            if analyzed_at and (last_analysis is None or analyzed_at > last_analysis):
+                last_analysis = analyzed_at
+            statuses.append(
+                ScannerSymbolStatus(
+                    symbol, status, score, reason, close_time, analyzed_at
+                )
+            )
             if (
                 decision is not None
                 and instrument is not None
@@ -865,6 +904,58 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
         if proposal is not None:
             preview = json.loads(proposal.preview_json)
             best = f"{preview.get('symbol')} {'LONG' if preview.get('side') == 'BUY' else 'SHORT'} / READY"
+        eligible = [
+            item
+            for item in statuses
+            if item.status not in {"ИСКЛЮЧЕН", "НЕТ ДАННЫХ"}
+        ]
+        closest = sorted(
+            eligible,
+            key=lambda item: (-item.signal_score, SCANNER_CONFIG.symbols.index(item.symbol)),
+        )[0] if eligible else None
+        runtime = session.get(SignalWaitRuntimeRecord, CONTROLLED_LIVE_V1.name)
+        controlled = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
+        equity = Decimal(runtime.equity) if runtime and runtime.equity is not None else None
+        positions = int(runtime.open_positions) if runtime and runtime.open_positions is not None else None
+        orders = int(runtime.open_orders) if runtime and runtime.open_orders is not None else None
+        trades_today = (
+            int(runtime.trades_today)
+            if runtime and runtime.trades_today is not None
+            else None
+        )
+        daily_pnl = (
+            Decimal(runtime.daily_realized_pnl)
+            if runtime and runtime.daily_realized_pnl is not None
+            else None
+        )
+        day_start_equity = (
+            Decimal(controlled.starting_day_equity)
+            if controlled and controlled.starting_day_equity is not None
+            else None
+        )
+        experiment_start_equity = (
+            Decimal(controlled.experiment_start_equity)
+            if controlled and controlled.experiment_start_equity is not None
+            else None
+        )
+        remaining_daily = (
+            max(
+                Decimal(),
+                day_start_equity * CONTROLLED_LIVE_V1.daily_loss_limit_pct
+                - max(Decimal(), -daily_pnl),
+            )
+            if day_start_equity is not None and daily_pnl is not None
+            else None
+        )
+        remaining_experiment = (
+            max(
+                Decimal(),
+                CONTROLLED_LIVE_V1.total_experiment_loss_limit
+                - max(Decimal(), experiment_start_equity - equity),
+            )
+            if experiment_start_equity is not None and equity is not None
+            else None
+        )
     return MultiSymbolScannerStatus(
         SCANNER_CONFIG.config_hash,
         _aware(state.started_at) if state else None,
@@ -875,16 +966,44 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
         short_candidates,
         rejects,
         best,
+        closest.symbol if closest else "НЕТ",
+        closest.signal_score if closest else 0,
+        max(0, CONTROLLED_LIVE_V1.signal_threshold - closest.signal_score)
+        if closest
+        else CONTROLLED_LIVE_V1.signal_threshold,
+        last_analysis,
+        equity,
+        positions,
+        orders,
+        trades_today,
+        daily_pnl,
+        remaining_daily,
+        remaining_experiment,
     )
 
 
 def format_scanner_status_ru(status: MultiSymbolScannerStatus) -> str:
-    lines = ["⏳ <b>MULTI-SYMBOL SIGNAL SCANNER</b>", ""]
+    lines = [
+        "🟢 <b>CONTROLLED LIVE STATUS</b>",
+        "",
+        "Активные настройки:",
+        f"Threshold: {CONTROLLED_LIVE_V1.signal_threshold}",
+        f"Риск: {_compact_decimal(CONTROLLED_LIVE_V1.risk_per_trade_pct * 100)}% equity",
+        f"Плечо: {_compact_decimal(CONTROLLED_LIVE_V1.leverage)}x",
+        "Минимальный R/R: 1:"
+        + _compact_decimal(CONTROLLED_LIVE_V1.minimum_risk_reward),
+        "",
+        "⏳ <b>MULTI-SYMBOL SIGNAL SCANNER</b>",
+        "",
+        "Последний анализ: "
+        + (status.last_analysis.strftime("%Y-%m-%d %H:%M:%S UTC") if status.last_analysis else "НЕТ"),
+    ]
     for item in status.symbols:
         short = item.symbol.removesuffix("USDT")
-        lines.append(f"{short} — {item.status}")
-        if item.status == "ИСКЛЮЧЕН":
-            lines.append(f"  Причина: {item.reason}")
+        lines.append(
+            f"{short} — score {item.signal_score} — {item.status}"
+        )
+        lines.append(f"  Причина pipeline: {item.reason or 'не сохранена'}")
     lines.extend(
         [
             "",
@@ -895,7 +1014,75 @@ def format_scanner_status_ru(status: MultiSymbolScannerStatus) -> str:
             f"SHORT candidates: {status.short_candidates}",
             f"Risk Manager rejects: {status.risk_rejects}",
             f"Лучший текущий candidate: {status.best_candidate}",
+            f"Ближе всего к threshold 70: {status.closest_symbol} "
+            f"(score {status.closest_score})",
+            f"Не хватает до входа: {status.score_gap} score",
+            "",
+            f"Текущая equity: {_status_money(status.equity)}",
+            f"Открытые позиции: {_status_number(status.open_positions)}",
+            f"Открытые orders: {_status_number(status.open_orders)}",
+            f"Сделок сегодня: {_status_number(status.trades_today)} / "
+            f"{CONTROLLED_LIVE_V1.max_trades_per_day}",
+            f"Realized PnL сегодня: {_status_money(status.daily_realized_pnl)}",
+            "Остаток дневного loss limit: "
+            + _status_money(status.remaining_daily_loss),
+            "Остаток общего лимита эксперимента $10: "
+            + _status_money(status.remaining_experiment_loss),
             f"Scanner hash: <code>{status.config_hash[:12]}…</code>",
         ]
     )
     return "\n".join(lines)
+
+
+def format_scanner_wait_reasons_ru(status: MultiSymbolScannerStatus) -> str:
+    lines = [
+        "📊 <b>ПОЧЕМУ WAIT?</b>",
+        "",
+        "Только фактические причины, сохранённые текущим pipeline:",
+    ]
+    waiting = [
+        item
+        for item in status.symbols
+        if item.status in {"WAIT", "RISK REJECT", "ИСКЛЮЧЕН", "НЕТ ДАННЫХ"}
+    ]
+    if not waiting:
+        lines.append("Последнее состояние не содержит WAIT/reject.")
+    else:
+        for item in waiting:
+            lines.append(
+                f"• {item.symbol}: {item.status}, score {item.signal_score} — "
+                f"{item.reason or 'причина не сохранена'}"
+            )
+    lines.extend(
+        [
+            "",
+            "Диагностические причины не дополняются предположениями Telegram-бота.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _persisted_decision_reason(decision: ShadowDecisionRecord) -> str:
+    reasons: list[str] = []
+    if decision.risk_reason:
+        reasons.append(str(decision.risk_reason))
+    try:
+        context = json.loads(decision.context_json or "{}")
+    except (TypeError, ValueError):
+        context = {}
+    context_reason = context.get("reason")
+    if context_reason and str(context_reason) not in {"WAIT", *reasons}:
+        reasons.append(str(context_reason))
+    return "; ".join(reasons) or "pipeline не сохранил причину"
+
+
+def _status_money(value: Decimal | None) -> str:
+    return f"{value.quantize(Decimal('0.0001'))} USDT" if value is not None else "НЕДОСТУПНО"
+
+
+def _status_number(value: int | None) -> str:
+    return str(value) if value is not None else "НЕДОСТУПНО"
+
+
+def _compact_decimal(value: Decimal) -> str:
+    return format(value.normalize(), "f")

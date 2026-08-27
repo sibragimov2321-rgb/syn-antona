@@ -23,7 +23,7 @@ from app.shadow.signal_wait_status import (
     format_wait_reasons,
 )
 from app.strategy_lab.phase4g import FROZEN_CONFIG_HASH
-from app.telegram.runner import signal_wait_keyboard
+from app.telegram.runner import dashboard, signal_wait_keyboard
 from app.trading.controlled_live import CONTROLLED_LIVE_V1
 
 
@@ -323,6 +323,17 @@ def test_signal_wait_keyboard_is_read_only_and_exact():
         "📊 Почему WAIT?",
     ]
     assert [button.callback_data for button in buttons] == [
-        "shadow:signal",
-        "shadow:why",
+        "controlled:status",
+        "controlled:why",
     ]
+
+
+def test_dashboard_separates_shadow_report_from_controlled_live_status():
+    buttons = [
+        button
+        for row in dashboard().inline_keyboard
+        for button in row
+    ]
+    callbacks = {button.text: button.callback_data for button in buttons}
+    assert callbacks["📊 SHADOW REPORT"] == "shadow:report"
+    assert callbacks["🟢 CONTROLLED LIVE STATUS"] == "controlled:status"

@@ -12,12 +12,6 @@ from app.domain.models import BotState
 from app.market.synthetic import SyntheticDemoData
 from app.shadow.engine import PROTOCOL_ID
 from app.shadow.repository import ShadowRepository, shadow_metrics
-from app.shadow.signal_wait_status import (
-    SignalWaitStatusRepository,
-    SignalWaitStatusService,
-    format_signal_wait_status,
-    format_wait_reasons,
-)
 from app.shadow.status import telegram_system_status
 from app.statistics import calculate_statistics
 from app.trading.controlled_live import ControlledLiveRepository
@@ -27,6 +21,7 @@ from app.trading.first_live_proposal import (
 )
 from app.trading.multi_symbol_scanner import (
     format_scanner_status_ru,
+    format_scanner_wait_reasons_ru,
     scanner_status,
 )
 
@@ -92,10 +87,17 @@ def dashboard() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton(text="📉 Статистика", callback_data="statistics")],
             [
-                InlineKeyboardButton(text="👁 Shadow-торговля", callback_data="shadow"),
+                InlineKeyboardButton(
+                    text="📊 SHADOW REPORT", callback_data="shadow:report"
+                ),
+                InlineKeyboardButton(
+                    text="🟢 CONTROLLED LIVE STATUS", callback_data="controlled:status"
+                ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="🟢 Состояние системы", callback_data="shadow:status"
-                ),
+                )
             ],
         ]
     )
@@ -117,28 +119,15 @@ def signal_wait_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="🔄 Проверить сигнал сейчас",
-                    callback_data="shadow:signal",
+                    callback_data="controlled:status",
                 ),
                 InlineKeyboardButton(
                     text="📊 Почему WAIT?",
-                    callback_data="shadow:why",
+                    callback_data="controlled:why",
                 ),
             ]
         ]
     )
-
-
-async def current_signal_wait_status():
-    settings = get_settings()
-    service = SignalWaitStatusService(
-        SignalWaitStatusRepository(SessionLocal),
-        None,
-        heartbeat_max_age_seconds=settings.shadow_heartbeat_max_age_seconds,
-    )
-    try:
-        return await service.snapshot()
-    finally:
-        await service.close()
 
 
 @router.message(CommandStart())
@@ -156,7 +145,14 @@ async def start(message: Message) -> None:
 @router.callback_query()
 async def actions(callback: CallbackQuery) -> None:
     emergency_actions = {"bot:emergency", "emergency:keep", "emergency:close"}
-    shadow_private_actions = {"shadow", "shadow:signal", "shadow:why"}
+    shadow_private_actions = {
+        "shadow",
+        "shadow:report",
+        "shadow:signal",
+        "shadow:why",
+        "controlled:status",
+        "controlled:why",
+    }
     admin_only = callback.data in emergency_actions | shadow_private_actions or bool(
         callback.data and callback.data.startswith("phase5e:")
     )
@@ -261,7 +257,7 @@ async def actions(callback: CallbackQuery) -> None:
         )
     elif callback.data == "analysis":
         await callback.message.answer("📊 <b>АНАЛИЗ</b>\n\nИспользуются только технические правила. AI API отключён.", parse_mode="HTML")
-    elif callback.data == "shadow":
+    elif callback.data in {"shadow", "shadow:report"}:
         repository = ShadowRepository()
         protocol = repository.protocol(PROTOCOL_ID)
         if not protocol:
@@ -271,17 +267,9 @@ async def actions(callback: CallbackQuery) -> None:
             days = (datetime.now(UTC) - locked_at).total_seconds() / 86400
             closed = repository.closed_trades(PROTOCOL_ID)
             metrics = shadow_metrics(closed)
-            settings = get_settings()
-            live_armed = (
-                not settings.dry_run
-                and settings.live_trading_enabled
-                and settings.controlled_live_enabled
-                and settings.manual_first_order_approved
-            )
             text = (
-                "👁 <b>SHADOW-ТОРГОВЛЯ</b>\n\n"
-                "Режим: SHADOW + CONTROLLED LIVE\n"
-                f"Controlled Live gates: {'ARMED' if live_armed else 'ВЫКЛЮЧЕНЫ'}\n"
+                "📊 <b>SHADOW REPORT — 30 DAYS</b>\n\n"
+                "Режим: отдельное prospective SHADOW-наблюдение\n"
                 "Стратегия: расширение волатильности, 1 час\n"
                 f"Дней наблюдения: {days:.2f}\n"
                 f"Сигналов: {repository.decisions_count(PROTOCOL_ID, signals_only=True)}\n"
@@ -293,28 +281,21 @@ async def actions(callback: CallbackQuery) -> None:
                 f"Максимальная просадка: ${metrics['max_drawdown']}\n"
                 f"Хэш протокола: <code>{protocol.protocol_hash}</code>"
             )
-            wait_status = await current_signal_wait_status()
-            text += "\n\n" + format_signal_wait_status(wait_status)
-            text += "\n\n" + format_scanner_status_ru(scanner_status(SessionLocal))
         await callback.message.answer(
             text,
             parse_mode="HTML",
-            reply_markup=signal_wait_keyboard() if protocol else None,
+            reply_markup=None,
         )
-    elif callback.data == "shadow:signal":
+    elif callback.data in {"shadow:signal", "controlled:status"}:
         # Read-only refresh: no market fetch into the strategy and no decision run.
-        wait_status = await current_signal_wait_status()
         await callback.message.answer(
-            format_signal_wait_status(wait_status)
-            + "\n\n"
-            + format_scanner_status_ru(scanner_status(SessionLocal)),
+            format_scanner_status_ru(scanner_status(SessionLocal)),
             parse_mode="HTML",
             reply_markup=signal_wait_keyboard(),
         )
-    elif callback.data == "shadow:why":
-        wait_status = await current_signal_wait_status()
+    elif callback.data in {"shadow:why", "controlled:why"}:
         await callback.message.answer(
-            format_wait_reasons(wait_status),
+            format_scanner_wait_reasons_ru(scanner_status(SessionLocal)),
             parse_mode="HTML",
             reply_markup=signal_wait_keyboard(),
         )

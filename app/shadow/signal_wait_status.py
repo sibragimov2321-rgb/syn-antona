@@ -46,6 +46,8 @@ class BybitWaitAccount:
     equity: Decimal
     open_positions: int
     open_orders: int
+    trades_today: int | None = None
+    daily_realized_pnl: Decimal | None = None
 
 
 class WaitAccountReader(Protocol):
@@ -76,11 +78,14 @@ class BybitSignalWaitReader:
             {"accountType": "UNIFIED", "coin": "USDT"},
         )
         positions = await self.client.private_get(
-            "/v5/position/list", {"category": "linear", "symbol": "SOLUSDT"}
+            "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}
         )
         orders = await self.client.private_get(
             "/v5/order/realtime",
-            {"category": "linear", "symbol": "SOLUSDT", "openOnly": 0, "limit": 50},
+            {"category": "linear", "settleCoin": "USDT", "openOnly": 0, "limit": 50},
+        )
+        fills = await self.client.private_get(
+            "/v5/execution/list", {"category": "linear", "limit": 100}
         )
         accounts = wallet.result.get("list") or []
         equity = Decimal(str(accounts[0].get("totalEquity") or "0")) if accounts else Decimal()
@@ -88,10 +93,31 @@ class BybitSignalWaitReader:
             Decimal(str(item.get("size") or "0")) > 0
             for item in positions.result.get("list") or []
         )
+        now = datetime.now(UTC)
+        day_start_ms = int(
+            datetime(now.year, now.month, now.day, tzinfo=UTC).timestamp() * 1000
+        )
+        order_results: dict[str, Decimal] = {}
+        for item in fills.result.get("list") or []:
+            try:
+                executed_at_ms = int(item.get("execTime") or 0)
+            except (TypeError, ValueError):
+                continue
+            if executed_at_ms < day_start_ms:
+                continue
+            order_id = str(item.get("orderId") or item.get("execId") or "")
+            if not order_id:
+                continue
+            order_results[order_id] = order_results.get(order_id, Decimal()) + (
+                Decimal(str(item.get("execPnl") or "0"))
+                - abs(Decimal(str(item.get("execFee") or "0")))
+            )
         return BybitWaitAccount(
             equity,
             open_positions,
             len(orders.result.get("list") or []),
+            len(order_results),
+            sum(order_results.values(), Decimal()),
         )
 
     async def close(self) -> None:
@@ -237,6 +263,10 @@ class SignalWaitStatusRepository:
             record.equity = account.equity
             record.open_positions = account.open_positions
             record.open_orders = account.open_orders
+            if account.trades_today is not None:
+                record.trades_today = account.trades_today
+            if account.daily_realized_pnl is not None:
+                record.daily_realized_pnl = account.daily_realized_pnl
             record.account_checked_at = checked_at
             record.account_error = None
             record.updated_at = checked_at

@@ -47,6 +47,7 @@ from app.trading.multi_symbol_scanner import (
     ScannerInstrument,
     ScannerReadSnapshot,
     format_scanner_status_ru,
+    format_scanner_wait_reasons_ru,
     scanner_status,
 )
 
@@ -574,12 +575,43 @@ def test_status_lists_exact_allowlist_and_uses_persisted_decisions_only():
         ]
     )
     scanner.save_market_snapshot(snapshot)
+    ControlledLiveRepository(sessions).refresh_loss_baselines(
+        Decimal("50"), Decimal(), datetime.now(UTC)
+    )
+    candle = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    _signal(
+        sessions,
+        "SOLUSDT",
+        "WAIT",
+        61,
+        candle,
+        datetime.now(UTC),
+        "0",
+        "0",
+    )
     value = scanner_status(sessions)
     text = format_scanner_status_ru(value)
+    reasons = format_scanner_wait_reasons_ru(value)
+    assert "CONTROLLED LIVE STATUS" in text
+    assert "Threshold: 70" in text
+    assert "Риск: 5% equity" in text
+    assert "Плечо: 2x" in text
+    assert "Минимальный R/R: 1:1.5" in text
     assert "MULTI-SYMBOL SIGNAL SCANNER" in text
     for symbol in SCANNER_CONFIG.symbols:
         assert symbol.removesuffix("USDT") + " —" in text
-    assert value.analyses_today == 0
+    assert value.analyses_today == 1
+    assert value.closest_symbol == "SOLUSDT"
+    assert value.closest_score == 61
+    assert value.score_gap == 9
+    assert value.equity == Decimal("50")
+    assert value.open_positions == 0
+    assert value.open_orders == 0
+    assert value.trades_today == 0
+    assert value.daily_realized_pnl == Decimal()
+    assert value.remaining_daily_loss == Decimal("5")
+    assert value.remaining_experiment_loss == Decimal("10")
+    assert "SOLUSDT: WAIT, score 61" in reasons
 
 
 class AllowAuthorizer:

@@ -216,6 +216,10 @@ class SignalWaitRuntimeRecord(Base):
     equity: Mapped[Decimal | None] = mapped_column(Numeric(24, 10), nullable=True)
     open_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     open_orders: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trades_today: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    daily_realized_pnl: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
     account_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
