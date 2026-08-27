@@ -220,6 +220,9 @@ class SignalWaitRuntimeRecord(Base):
     daily_realized_pnl: Mapped[Decimal | None] = mapped_column(
         Numeric(24, 10), nullable=True
     )
+    open_planned_risk: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
     account_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

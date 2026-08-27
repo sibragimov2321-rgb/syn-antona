@@ -248,9 +248,9 @@ async def actions(callback: CallbackQuery) -> None:
         await callback.message.answer(
             "🛡 <b>CONTROLLED LIVE — РИСК</b>\n\n"
             "Порог сигнала: 70\nРиск на сделку: максимум 5% equity\n"
-            "Дневной лимит: 10% starting-day equity\n"
-            "Лимит эксперимента: $10\nМаксимум позиций: 1\n"
-            "Максимум сделок/день: 4\nПлечо: 2x\n"
+            "Абсолютный дневной risk budget: $5\n"
+            "Лимит эксперимента: $10\nМаксимум позиций: 3\n"
+            "Количество сделок/день: без лимита\nПлечо: 2x\n"
             "Минимум риск/прибыль: 1:1,5\nTrailing: OFF\n"
             "После двух последовательных убытков: STOP до следующего UTC дня.",
             parse_mode="HTML",

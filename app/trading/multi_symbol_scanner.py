@@ -34,6 +34,7 @@ from app.db import (
     SignalWaitRuntimeRecord,
 )
 from app.exchanges.bybit_readonly import BybitMainnetReadOnlyClient
+from app.exchanges.bybit_v5_gateway import _open_positions_planned_risk
 from app.exchanges.models import InstrumentRules, OrderSide
 from app.shadow.engine import PROTOCOL_ID
 from app.shadow.status import execution_runtime_status
@@ -68,6 +69,10 @@ INSTRUMENT_MAX_AGE = timedelta(minutes=5)
 
 def _decimal(value: Any) -> Decimal:
     return Decimal(str(value or "0"))
+
+
+def _bool(value: Any) -> bool:
+    return value is True or str(value).strip().lower() == "true"
 
 
 def _aware(value: datetime) -> datetime:
@@ -123,6 +128,9 @@ class ScannerAccount:
     daily_realized_pnl: Decimal
     consecutive_losses: int
     cooldown_until: datetime | None
+    open_planned_risk: Decimal = Decimal()
+    open_position_symbols: frozenset[str] = frozenset()
+    blocking_open_order_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -149,6 +157,12 @@ class BybitMultiSymbolReadOnlyReader:
 
     async def read(self) -> ScannerReadSnapshot:
         await self.client.synchronize_time()
+        day_start_ms = int(
+            datetime.now(UTC)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+            * 1000
+        )
         public = await asyncio.gather(
             *(
                 asyncio.gather(
@@ -177,9 +191,28 @@ class BybitMultiSymbolReadOnlyReader:
                 {"category": "linear", "settleCoin": "USDT", "openOnly": 0, "limit": 50},
             ),
             self.client.private_get(
-                "/v5/execution/list", {"category": "linear", "limit": 100}
+                "/v5/execution/list",
+                {"category": "linear", "startTime": day_start_ms, "limit": 100},
             ),
         )
+        execution_rows = list(fills.result.get("list") or [])
+        cursor = str(fills.result.get("nextPageCursor") or "")
+        seen_cursors: set[str] = set()
+        while cursor:
+            if cursor in seen_cursors or len(seen_cursors) >= 49:
+                raise RuntimeError("Bybit execution pagination is incomplete")
+            seen_cursors.add(cursor)
+            page = await self.client.private_get(
+                "/v5/execution/list",
+                {
+                    "category": "linear",
+                    "startTime": day_start_ms,
+                    "limit": 100,
+                    "cursor": cursor,
+                },
+            )
+            execution_rows.extend(page.result.get("list") or [])
+            cursor = str(page.result.get("nextPageCursor") or "")
         now = datetime.now(UTC)
         instruments: dict[str, ScannerInstrument] = {}
         for symbol, (instrument_result, ticker_result) in zip(
@@ -194,7 +227,7 @@ class BybitMultiSymbolReadOnlyReader:
 
         accounts = wallet.result.get("list") or []
         account = accounts[0] if accounts else {}
-        executions = fills.result.get("list") or []
+        executions = execution_rows
         day_start = datetime(now.year, now.month, now.day, tzinfo=UTC)
         daily = [
             item
@@ -225,18 +258,21 @@ class BybitMultiSymbolReadOnlyReader:
                 latest_loss_time = latest_loss_time or order_times[order_id]
             else:
                 break
+        position_rows = [
+            item
+            for item in positions.result.get("list") or []
+            if _decimal(item.get("size")) > 0
+        ]
+        order_rows = orders.result.get("list") or []
         return ScannerReadSnapshot(
             instruments,
             ScannerAccount(
                 equity=_decimal(account.get("totalEquity")),
                 available_balance=_decimal(account.get("totalAvailableBalance")),
-                open_positions=sum(
-                    _decimal(item.get("size")) > 0
-                    for item in positions.result.get("list") or []
-                ),
+                open_positions=len(position_rows),
                 open_order_ids=frozenset(
                     str(item.get("orderId"))
-                    for item in orders.result.get("list") or []
+                    for item in order_rows
                     if item.get("orderId")
                 ),
                 fills_read=isinstance(fills.result.get("list"), list),
@@ -249,6 +285,17 @@ class BybitMultiSymbolReadOnlyReader:
                     and losses >= CONTROLLED_LIVE_V1.max_consecutive_losses
                     and CONTROLLED_LIVE_V1.consecutive_loss_stop_until_next_utc_day
                     else None
+                ),
+                open_planned_risk=_open_positions_planned_risk(position_rows),
+                open_position_symbols=frozenset(
+                    str(item.get("symbol"))
+                    for item in position_rows
+                    if item.get("symbol")
+                ),
+                blocking_open_order_ids=frozenset(
+                    str(item.get("orderId"))
+                    for item in order_rows
+                    if item.get("orderId") and not _bool(item.get("reduceOnly"))
                 ),
             ),
             now,
@@ -394,6 +441,7 @@ class MultiSymbolScannerRepository:
             account.open_orders = len(snapshot.account.open_order_ids)
             account.trades_today = snapshot.account.trades_today
             account.daily_realized_pnl = snapshot.account.daily_realized_pnl
+            account.open_planned_risk = snapshot.account.open_planned_risk
             account.account_checked_at = snapshot.fetched_at
             account.account_error = None
             account.updated_at = snapshot.fetched_at
@@ -590,12 +638,15 @@ class MultiSymbolFirstProposalCoordinator:
                         phase.status,
                         "Cannot verify prior position closure; automatic scan remains blocked",
                     )
-                if snapshot.account.open_positions or snapshot.account.open_order_ids:
+                if (
+                    snapshot.account.open_positions >= CONTROLLED_LIVE_V1.max_positions
+                    or snapshot.account.blocking_open_order_ids
+                ):
                     return ProposalCycleResult(
                         phase.status,
-                        "Prior controlled-live position/order remains active",
+                        "Position capacity is full or an entry order remains active",
                     )
-                self.phase_repository.release_closed_position_for_automatic_scan()
+                self.phase_repository.release_position_slot_for_automatic_scan()
                 phase = self.phase_repository.state()
             else:
                 record = self.phase_repository.proposal(phase.proposal_id)
@@ -721,8 +772,12 @@ class MultiSymbolFirstProposalCoordinator:
             raise CandidateRejected("Deterministic Risk Manager did not ALLOW")
         if candidate.decision.signal_score < CONTROLLED_LIVE_V1.signal_threshold:
             raise CandidateRejected("Signal score is below the controlled-live threshold")
-        if account.open_positions or account.open_order_ids:
-            raise CandidateRejected("Bybit already has an open position or open order")
+        if account.open_positions >= CONTROLLED_LIVE_V1.max_positions:
+            raise CandidateRejected("Maximum open positions reached")
+        if instrument.symbol in account.open_position_symbols:
+            raise CandidateRejected("Bybit already has a position for this symbol")
+        if account.blocking_open_order_ids:
+            raise CandidateRejected("Bybit already has a pending entry order")
         if not account.fills_read:
             raise CandidateRejected("Bybit fills read/reconciliation failed")
         if datetime.now(UTC) - instrument.checked_at > INSTRUMENT_MAX_AGE:
@@ -757,6 +812,7 @@ class MultiSymbolFirstProposalCoordinator:
                 cooldown_until=account.cooldown_until,
                 starting_day_equity=starting_day_equity,
                 experiment_start_equity=experiment_start_equity,
+                open_planned_risk=account.open_planned_risk,
             ),
             InstrumentRules(
                 instrument.tick_size,
@@ -814,6 +870,7 @@ class MultiSymbolScannerStatus:
     open_orders: int | None
     trades_today: int | None
     daily_realized_pnl: Decimal | None
+    open_planned_risk: Decimal | None
     remaining_daily_loss: Decimal | None
     remaining_experiment_loss: Decimal | None
     shadow_runtime: str
@@ -953,9 +1010,9 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
             if runtime_account and runtime_account.daily_realized_pnl is not None
             else None
         )
-        day_start_equity = (
-            Decimal(controlled.starting_day_equity)
-            if controlled and controlled.starting_day_equity is not None
+        open_planned_risk = (
+            Decimal(runtime_account.open_planned_risk)
+            if runtime_account and runtime_account.open_planned_risk is not None
             else None
         )
         experiment_start_equity = (
@@ -966,10 +1023,11 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
         remaining_daily = (
             max(
                 Decimal(),
-                day_start_equity * CONTROLLED_LIVE_V1.daily_loss_limit_pct
-                - max(Decimal(), -daily_pnl),
+                CONTROLLED_LIVE_V1.daily_max_loss_usdt
+                - max(Decimal(), -daily_pnl)
+                - open_planned_risk,
             )
-            if day_start_equity is not None and daily_pnl is not None
+            if daily_pnl is not None and open_planned_risk is not None
             else None
         )
         remaining_experiment = (
@@ -1002,6 +1060,7 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
         orders,
         trades_today,
         daily_pnl,
+        open_planned_risk,
         remaining_daily,
         remaining_experiment,
         execution_runtime["shadow"],
@@ -1064,12 +1123,13 @@ def format_scanner_status_ru(status: MultiSymbolScannerStatus) -> str:
             f"Не хватает до входа: {status.score_gap} score",
             "",
             f"Текущая equity: {_status_money(status.equity)}",
-            f"Открытые позиции: {_status_number(status.open_positions)}",
+            f"Позиции: {_status_number(status.open_positions)} / {CONTROLLED_LIVE_V1.max_positions}",
             f"Открытые orders: {_status_number(status.open_orders)}",
-            f"Сделок сегодня: {_status_number(status.trades_today)} / "
-            f"{CONTROLLED_LIVE_V1.max_trades_per_day}",
+            f"Сделок сегодня: {_status_number(status.trades_today)} (без лимита)",
             f"Realized PnL сегодня: {_status_money(status.daily_realized_pnl)}",
-            "Остаток дневного loss limit: "
+            "Риск открытых позиций до SL: "
+            + _status_money(status.open_planned_risk),
+            "Остаток дневного risk budget из $5: "
             + _status_money(status.remaining_daily_loss),
             "Остаток общего лимита эксперимента $10: "
             + _status_money(status.remaining_experiment_loss),

@@ -35,12 +35,12 @@ from app.trading.controlled_universe import (
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1.json"
-CONTROLLED_LIVE_V1_HASH = "f0e6296f82534071947ac0f7095abc64338a824286dde11c2d9e0d59749d7913"
+CONTROLLED_LIVE_V1_HASH = "b382d2251bed6558bb14cc17e5ee411f76428c111e0fa5c26868b75cc739136f"
 FIRST_INSTRUMENT_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1_first_symbol.json"
 )
 CONTROLLED_LIVE_V1_FIRST_INSTRUMENT_HASH = (
-    "58a2fb93d6bc6baaf138403bb75eb8300fcdf40811f51bc71ef7a55969e4262e"
+    "8a453a1c1dd9b274d14b7dec2dc0e61adf3e79d56cf860194cc2e01fbcbb2938"
 )
 MANUAL_SOURCE = "MANUAL_EXECUTION_VALIDATION"
 BYBIT_TAKER_FEE_RATE = Decimal("0.00055")
@@ -69,9 +69,9 @@ class ControlledLiveProfile:
     signal_threshold: int
     leverage: Decimal
     max_positions: int
-    max_trades_per_day: int
+    max_trades_per_day: int | None
     risk_per_trade_pct: Decimal
-    daily_loss_limit_pct: Decimal
+    daily_max_loss_usdt: Decimal
     total_experiment_loss_limit: Decimal
     max_consecutive_losses: int
     consecutive_loss_stop_until_next_utc_day: bool
@@ -99,9 +99,13 @@ def load_controlled_live_profile(path: Path = PROFILE_PATH) -> ControlledLivePro
         signal_threshold=int(raw["signal_threshold"]),
         leverage=Decimal(raw["leverage"]),
         max_positions=int(raw["max_positions"]),
-        max_trades_per_day=int(raw["max_trades_per_day"]),
+        max_trades_per_day=(
+            int(raw["max_trades_per_day"])
+            if raw.get("max_trades_per_day") is not None
+            else None
+        ),
         risk_per_trade_pct=Decimal(raw["risk_per_trade_pct"]),
-        daily_loss_limit_pct=Decimal(raw["daily_loss_limit_pct"]),
+        daily_max_loss_usdt=Decimal(raw["daily_max_loss_usdt"]),
         total_experiment_loss_limit=Decimal(
             raw["total_experiment_loss_limit_usdt"]
         ),
@@ -217,6 +221,7 @@ class ControlledRiskSnapshot:
     cooldown_until: datetime | None = None
     starting_day_equity: Decimal | None = None
     experiment_start_equity: Decimal | None = None
+    open_planned_risk: Decimal = Decimal()
 
 
 @dataclass(frozen=True)
@@ -294,8 +299,16 @@ def build_manual_preview(
     expected_fee = Decimal()
     estimated_slippage = Decimal()
     maximum_loss = Decimal()
+    risk_budget = Decimal()
+    daily_budget_limited = False
     if reason is None:
-        risk_budget = risk.equity * profile.risk_per_trade_pct
+        per_trade_cap = risk.equity * profile.risk_per_trade_pct
+        remaining_daily_budget = remaining_daily_risk_budget(risk, profile)
+        risk_budget = min(per_trade_cap, remaining_daily_budget)
+        daily_budget_limited = remaining_daily_budget < per_trade_cap
+        if risk_budget <= 0:
+            reason = DAILY_RISK_BUDGET_REASON
+    if reason is None:
         loss_fee_and_slippage_per_unit = (
             per_unit_risk
             + inputs.reference_price * BYBIT_TAKER_FEE_RATE
@@ -319,11 +332,15 @@ def build_manual_preview(
         ) * profile.estimated_slippage_per_leg
         maximum_loss = quantity * per_unit_risk + expected_fee + estimated_slippage
         if quantity < rules.minimum_quantity:
-            reason = (
+            reason = DAILY_RISK_BUDGET_REASON if daily_budget_limited else (
                 "Instrument minimum quantity exceeds the controlled first-order notional cap"
             )
         elif expected_notional < rules.minimum_notional:
-            reason = "Instrument minimum notional is not met"
+            reason = (
+                DAILY_RISK_BUDGET_REASON
+                if daily_budget_limited
+                else "Instrument minimum notional is not met"
+            )
         elif expected_notional > cap:
             reason = "Controlled first-order notional cap exceeded"
         elif maximum_loss > risk_budget:
@@ -331,6 +348,13 @@ def build_manual_preview(
                 "Maximum planned loss exceeds "
                 f"{profile.risk_per_trade_pct * 100}% equity"
             )
+        elif (
+            realized_daily_loss(risk.daily_realized_pnl)
+            + risk.open_planned_risk
+            + maximum_loss
+            > profile.daily_max_loss_usdt
+        ):
+            reason = DAILY_RISK_BUDGET_REASON
         elif expected_notional / profile.leverage + expected_fee > risk.available_balance:
             reason = "Insufficient available balance"
 
@@ -369,13 +393,10 @@ def _risk_rejection(
         return "Trailing stop must remain OFF"
     if risk.open_positions >= profile.max_positions:
         return "Maximum open positions reached"
-    if risk.trades_today >= profile.max_trades_per_day:
-        return "Maximum trades per UTC day reached"
-    starting_day_equity = risk.starting_day_equity or risk.equity
-    if risk.daily_realized_pnl <= -(
-        starting_day_equity * profile.daily_loss_limit_pct
-    ):
-        return "Daily loss limit reached"
+    if risk.open_planned_risk < 0:
+        return "Invalid open planned risk"
+    if remaining_daily_risk_budget(risk, profile) <= 0:
+        return DAILY_RISK_BUDGET_REASON
     if (
         risk.experiment_start_equity is not None
         and risk.experiment_start_equity - risk.equity
@@ -389,6 +410,26 @@ def _risk_rejection(
     if _per_unit_risk(inputs) <= 0 or _per_unit_reward(inputs) <= 0:
         return "Invalid SL/TP ordering"
     return None
+
+
+DAILY_RISK_BUDGET_REASON = "WAIT: DAILY RISK BUDGET"
+
+
+def realized_daily_loss(daily_realized_pnl: Decimal) -> Decimal:
+    """Profit never expands the fixed UTC-day loss allowance."""
+    return max(Decimal(), -daily_realized_pnl)
+
+
+def remaining_daily_risk_budget(
+    risk: ControlledRiskSnapshot,
+    profile: ControlledLiveProfile = CONTROLLED_LIVE_V1,
+) -> Decimal:
+    return max(
+        Decimal(),
+        profile.daily_max_loss_usdt
+        - realized_daily_loss(risk.daily_realized_pnl)
+        - risk.open_planned_risk,
+    )
 
 
 def _aware(value: datetime) -> datetime:

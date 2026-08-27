@@ -132,10 +132,10 @@ def test_controlled_live_v1_is_frozen_and_exact() -> None:
     assert CONTROLLED_LIVE_V1.symbol == "BTC/USDT"
     assert CONTROLLED_LIVE_V1.signal_threshold == 70
     assert CONTROLLED_LIVE_V1.leverage == 2
-    assert CONTROLLED_LIVE_V1.max_positions == 1
-    assert CONTROLLED_LIVE_V1.max_trades_per_day == 4
+    assert CONTROLLED_LIVE_V1.max_positions == 3
+    assert CONTROLLED_LIVE_V1.max_trades_per_day is None
     assert CONTROLLED_LIVE_V1.risk_per_trade_pct == Decimal("0.05")
-    assert CONTROLLED_LIVE_V1.daily_loss_limit_pct == Decimal("0.10")
+    assert CONTROLLED_LIVE_V1.daily_max_loss_usdt == Decimal("5")
     assert CONTROLLED_LIVE_V1.total_experiment_loss_limit == Decimal("10")
     assert CONTROLLED_LIVE_V1.max_consecutive_losses == 2
     assert CONTROLLED_LIVE_V1.consecutive_loss_stop_until_next_utc_day is True
@@ -240,7 +240,7 @@ def test_total_experiment_loss_limit_is_hard_rejection() -> None:
     assert "experiment loss limit" in preview.reason
 
 
-def test_daily_limit_uses_starting_day_equity() -> None:
+def test_daily_limit_is_absolute_five_usdt() -> None:
     preview = build_manual_preview(
         _inputs(),
         _risk(
@@ -251,15 +251,66 @@ def test_daily_limit_uses_starting_day_equity() -> None:
         _rules(),
     )
     assert not preview.executable
-    assert "Daily loss limit" in preview.reason
+    assert preview.reason == "WAIT: DAILY RISK BUDGET"
+
+
+def test_daily_budget_caps_new_trade_after_realized_and_open_risk() -> None:
+    profile = replace(
+        CONTROLLED_LIVE_V1,
+        max_position_notional=Decimal("1000"),
+        first_execution_notional_cap=Decimal("1000"),
+    )
+    instrument = replace(
+        CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
+        first_order_notional_cap=Decimal("1000"),
+    )
+    preview = build_manual_preview(
+        _inputs(reference_price=Decimal("100"), stop_loss=Decimal("95"), take_profit=Decimal("107.5")),
+        _risk(daily_realized_pnl=Decimal("-2.5"), open_planned_risk=Decimal("1.5")),
+        replace(_rules(), quantity_step=Decimal("0.001")),
+        profile=profile,
+        instrument=instrument,
+    )
+    assert preview.executable
+    assert Decimal("0.99") <= preview.maximum_planned_loss <= Decimal("1.00")
+
+
+def test_daily_profit_does_not_expand_five_usdt_budget() -> None:
+    profile = replace(
+        CONTROLLED_LIVE_V1,
+        max_position_notional=Decimal("1000"),
+        first_execution_notional_cap=Decimal("1000"),
+    )
+    instrument = replace(
+        CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
+        first_order_notional_cap=Decimal("1000"),
+    )
+    preview = build_manual_preview(
+        _inputs(reference_price=Decimal("100"), stop_loss=Decimal("95"), take_profit=Decimal("107.5")),
+        _risk(daily_realized_pnl=Decimal("20")),
+        replace(_rules(), quantity_step=Decimal("0.001")),
+        profile=profile,
+        instrument=instrument,
+    )
+    assert preview.executable
+    assert Decimal("2.49") <= preview.maximum_planned_loss <= Decimal("2.50")
+
+
+def test_trade_count_is_unlimited() -> None:
+    preview = build_manual_preview(_inputs(), _risk(trades_today=10_000), _rules())
+    assert preview.executable
+
+
+def test_two_existing_positions_still_leave_one_slot() -> None:
+    preview = build_manual_preview(_inputs(), _risk(open_positions=2), _rules())
+    assert preview.executable
 
 
 @pytest.mark.parametrize(
     ("risk", "message"),
     [
-        (_risk(open_positions=1), "Maximum open positions"),
-        (_risk(trades_today=4), "Maximum trades"),
-        (_risk(daily_realized_pnl=Decimal("-5")), "Daily loss"),
+        (_risk(open_positions=3), "Maximum open positions"),
+        (_risk(daily_realized_pnl=Decimal("-5")), "WAIT: DAILY RISK BUDGET"),
         (_risk(consecutive_losses=2), "Consecutive-loss"),
         (
             _risk(cooldown_until=datetime.now(UTC) + timedelta(minutes=1)),

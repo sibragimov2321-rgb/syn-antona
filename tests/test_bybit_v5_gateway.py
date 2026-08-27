@@ -659,9 +659,43 @@ def _armed_environment(monkeypatch):
 async def test_production_guard_counts_positions_across_entire_unified_account(monkeypatch):
     _, sessions, _, preview = _preview()
     _armed_environment(monkeypatch)
-    http = GuardHttp(positions=[{"symbol": "XRPUSDT", "size": "1"}])
+    http = GuardHttp(positions=[
+        {
+            "symbol": symbol,
+            "size": "1",
+            "side": "Buy",
+            "avgPrice": "1",
+            "stopLoss": "0.9",
+            "takeProfit": "1.2",
+        }
+        for symbol in ("XRPUSDT", "ADAUSDT", "DOGEUSDT")
+    ])
     with pytest.raises(ControlledLiveBlocked, match="Maximum open positions"):
         await ProductionMutationGuard(sessions, http).authorize(
+            action="CREATE",
+            symbol="SOLUSDT",
+            quantity=Decimal("0.1"),
+            client_order_id=preview.client_order_id,
+        )
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_production_guard_reserves_open_position_risk(monkeypatch):
+    _, sessions, _, preview = _preview()
+    _armed_environment(monkeypatch)
+    position = {
+        "symbol": "XRPUSDT",
+        "size": "41",
+        "side": "Buy",
+        "avgPrice": "1",
+        "stopLoss": "0.88",
+        "takeProfit": "1.2",
+    }
+    with pytest.raises(ControlledLiveBlocked, match="WAIT: DAILY RISK BUDGET"):
+        await ProductionMutationGuard(
+            sessions, GuardHttp(positions=[position])
+        ).authorize(
             action="CREATE",
             symbol="SOLUSDT",
             quantity=Decimal("0.1"),
@@ -730,7 +764,7 @@ async def test_production_guard_enforces_starting_day_and_total_loss_limits(monk
         "execFee": "0",
         "execTime": str(now_ms),
     }]
-    with pytest.raises(ControlledLiveBlocked, match="Daily loss limit"):
+    with pytest.raises(ControlledLiveBlocked, match="WAIT: DAILY RISK BUDGET"):
         await ProductionMutationGuard(
             sessions,
             GuardHttp(executions=daily_loss, equity="45"),

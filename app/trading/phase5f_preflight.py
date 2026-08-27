@@ -143,10 +143,10 @@ async def build_report() -> dict:
         and CONTROLLED_LIVE_V1.signal_threshold == 70
         and CONTROLLED_LIVE_V1.risk_per_trade_pct == Decimal("0.05")
         and CONTROLLED_LIVE_V1.leverage == Decimal("2")
-        and CONTROLLED_LIVE_V1.max_positions == 1
-        and CONTROLLED_LIVE_V1.max_trades_per_day == 4
+        and CONTROLLED_LIVE_V1.max_positions == 3
+        and CONTROLLED_LIVE_V1.max_trades_per_day is None
         and CONTROLLED_LIVE_V1.minimum_risk_reward == Decimal("1.5")
-        and CONTROLLED_LIVE_V1.daily_loss_limit_pct == Decimal("0.10")
+        and CONTROLLED_LIVE_V1.daily_max_loss_usdt == Decimal("5")
         and CONTROLLED_LIVE_V1.total_experiment_loss_limit == Decimal("10")
         and MUTATING_PATHS
         == frozenset(

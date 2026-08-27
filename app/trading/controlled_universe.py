@@ -15,7 +15,7 @@ CONFIG_PATH = (
     / "controlled_live_multi_symbol_v1.json"
 )
 MULTI_SYMBOL_CONFIG_HASH = (
-    "e04de86c0182ff633b218cd8a1d4503c1d4b4a63a7caa929c724d99a01413838"
+    "dca304642a055cea080adf7da2e74104195e8c54aacd6864a55e41ecc91eab6d"
 )
 PROFILE_NAME = "CONTROLLED_LIVE_MULTI_SYMBOL_V1"
 FROZEN_SIGNAL_SOURCE = "FROZEN_STRATEGY_ADMIN_REVIEW"
@@ -35,7 +35,9 @@ class MultiSymbolScannerConfig:
     signal_threshold: int
     leverage: Decimal
     risk_per_trade_pct: Decimal
-    daily_loss_limit_pct: Decimal
+    max_positions: int
+    max_trades_per_day: int | None
+    daily_max_loss_usdt: Decimal
     total_experiment_loss_limit: Decimal
     minimum_risk_reward: Decimal
     config_hash: str
@@ -64,7 +66,13 @@ def load_scanner_config(path: Path = CONFIG_PATH) -> MultiSymbolScannerConfig:
         signal_threshold=int(raw["signal_threshold"]),
         leverage=Decimal(raw["leverage"]),
         risk_per_trade_pct=Decimal(raw["risk_per_trade_pct"]),
-        daily_loss_limit_pct=Decimal(raw["daily_loss_limit_pct"]),
+        max_positions=int(raw["max_positions"]),
+        max_trades_per_day=(
+            int(raw["max_trades_per_day"])
+            if raw.get("max_trades_per_day") is not None
+            else None
+        ),
+        daily_max_loss_usdt=Decimal(raw["daily_max_loss_usdt"]),
         total_experiment_loss_limit=Decimal(
             raw["total_experiment_loss_limit_usdt"]
         ),

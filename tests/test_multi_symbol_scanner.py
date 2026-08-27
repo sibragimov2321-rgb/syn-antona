@@ -274,6 +274,55 @@ async def test_controlled_live_signal_threshold_is_exactly_seventy(score, expect
     assert result.status == expected
 
 
+@pytest.mark.asyncio
+async def test_scanner_blocks_fourth_simultaneous_position():
+    sessions, phase, scanner = _setup()
+    candle = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    _signal(sessions, "SOLUSDT", "LONG", 90, candle, datetime.now(UTC), "89", "93")
+    snapshot = _market_snapshot(
+        _instrument("SOLUSDT", bid="89.99", ask="90", step="0.1", minimum_quantity="0.1", tick="0.01")
+    )
+    snapshot = replace(
+        snapshot,
+        account=replace(
+            snapshot.account,
+            open_positions=3,
+            open_planned_risk=Decimal("3"),
+            open_position_symbols=frozenset({"XRPUSDT", "ADAUSDT", "LINKUSDT"}),
+        ),
+    )
+    result = await MultiSymbolFirstProposalCoordinator(
+        scanner, phase, Reader(snapshot), {42}
+    ).cycle()
+    assert result.status == "WAITING_FOR_SIGNAL"
+    assert "Maximum open positions reached" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_scanner_blocks_when_daily_risk_budget_is_exhausted():
+    sessions, phase, scanner = _setup()
+    candle = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    _signal(sessions, "SOLUSDT", "LONG", 90, candle, datetime.now(UTC), "89", "93")
+    snapshot = _market_snapshot(
+        _instrument("SOLUSDT", bid="89.99", ask="90", step="0.1", minimum_quantity="0.1", tick="0.01")
+    )
+    snapshot = replace(
+        snapshot,
+        account=replace(
+            snapshot.account,
+            open_positions=2,
+            daily_realized_pnl=Decimal("-2.5"),
+            open_planned_risk=Decimal("2.5"),
+            open_position_symbols=frozenset({"XRPUSDT", "ADAUSDT"}),
+        ),
+    )
+    result = await MultiSymbolFirstProposalCoordinator(
+        scanner, phase, Reader(snapshot), {42}
+    ).cycle()
+    assert result.status == "WAITING_FOR_SIGNAL"
+    assert "WAIT: DAILY RISK BUDGET" in result.reason
+
+
 class ExecutionGateway:
     dry_run = False
 
@@ -438,7 +487,6 @@ async def test_worker_executes_only_after_arming_then_requires_restart_reconcili
     assert not controlled.state().kill_switch_active
     assert controlled.state().automatic_execution_enabled
 
-    gateway.position_open = False
     next_candle = candle + timedelta(hours=1)
     _signal(
         sessions,
@@ -450,21 +498,29 @@ async def test_worker_executes_only_after_arming_then_requires_restart_reconcili
         "91",
         "87",
     )
+    next_snapshot = _market_snapshot(
+        _instrument(
+            "SOLUSDT",
+            bid="90",
+            ask="90.01",
+            step="0.1",
+            minimum_quantity="0.1",
+            tick="0.01",
+        )
+    )
+    next_snapshot = replace(
+        next_snapshot,
+        account=replace(
+            next_snapshot.account,
+            open_positions=1,
+            open_planned_risk=Decimal("1"),
+            open_position_symbols=frozenset({"XRPUSDT"}),
+        ),
+    )
     automatic = await MultiSymbolFirstProposalCoordinator(
         scanner,
         phase,
-        Reader(
-            _market_snapshot(
-                _instrument(
-                    "SOLUSDT",
-                    bid="90",
-                    ask="90.01",
-                    step="0.1",
-                    minimum_quantity="0.1",
-                    tick="0.01",
-                )
-            )
-        ),
+        Reader(next_snapshot),
         {42},
     ).cycle()
     assert automatic.status == "APPROVED_FOR_EXECUTION"
@@ -615,11 +671,16 @@ def test_status_lists_exact_allowlist_and_uses_persisted_decisions_only():
     assert value.open_orders == 0
     assert value.trades_today == 0
     assert value.daily_realized_pnl == Decimal()
+    assert value.open_planned_risk == Decimal()
     assert value.remaining_daily_loss == Decimal("5")
     assert value.remaining_experiment_loss == Decimal("10")
     assert "SOLUSDT: WAIT, score 61" in reasons
     assert "R/R &lt; 1.5 &amp; Risk Manager WAIT" in text
     assert "R/R &lt; 1.5 &amp; Risk Manager WAIT" in reasons
+    assert "Позиции: 0 / 3" in text
+    assert "Сделок сегодня: 0 (без лимита)" in text
+    assert "Риск открытых позиций до SL: 0.0000 USDT" in text
+    assert "Остаток дневного risk budget из $5: 5.0000 USDT" in text
 
 
 class AllowAuthorizer:

@@ -31,6 +31,7 @@ from app.db import (
 from app.exchanges.bybit_readonly import permission_summary
 from app.trading.controlled_live import (
     ArmingGates,
+    BYBIT_TAKER_FEE_RATE,
     CONTROLLED_LIVE_V1,
     CONTROLLED_LIVE_V1_FIRST_INSTRUMENT,
     ControlledLiveBlocked,
@@ -108,6 +109,7 @@ class GuardSnapshot:
     open_positions: int
     equity: Decimal
     daily_realized_pnl: Decimal
+    open_planned_risk: Decimal = Decimal()
 
 
 class MutationAuthorizer(Protocol):
@@ -252,7 +254,7 @@ class ProductionMutationGuard:
         if symbol not in ALLOWED_SYMBOLS:
             raise ControlledLiveBlocked("Symbol is not in the immutable scanner allowlist")
 
-        proposal, state, attempts_today = self._persistent_checks(client_order_id)
+        proposal, state, _attempts_today = self._persistent_checks(client_order_id)
         preview = json.loads(proposal.preview_json)
         approved_symbol = str(preview.get("symbol") or "")
         approved_quantity = _decimal(preview.get("quantity"))
@@ -264,10 +266,6 @@ class ProductionMutationGuard:
             raise ControlledLiveBlocked("Risk-reducing quantity is outside the approved position")
         if state.kill_switch_active and not risk_reducing:
             raise ControlledLiveBlocked("Emergency kill switch is active")
-        # The durable claim for the current request already exists by the time
-        # the gateway is reached, so allow that row to be the fourth attempt.
-        if attempts_today > CONTROLLED_LIVE_V1.max_trades_per_day and not risk_reducing:
-            raise ControlledLiveBlocked("Maximum trades per UTC day reached")
         if proposal.admin_telegram_id not in get_settings().admin_telegram_ids:
             raise ControlledLiveBlocked("Persistent approval does not belong to an active admin")
 
@@ -307,48 +305,65 @@ class ProductionMutationGuard:
         positions = await self._http.private_get(
             "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}
         )
-        open_positions = sum(_decimal(item.get("size")) > 0 for item in positions.get("list") or [])
-        allowed_positions = 1 if risk_reducing or action == "PROTECTION" else 0
-        if open_positions > allowed_positions:
+        position_rows = [
+            item for item in positions.get("list") or [] if _decimal(item.get("size")) > 0
+        ]
+        open_positions = len(position_rows)
+        if (
+            not risk_reducing
+            and action == "CREATE"
+            and open_positions >= CONTROLLED_LIVE_V1.max_positions
+        ):
             raise ControlledLiveBlocked("Maximum open positions reached")
+        if (
+            not risk_reducing
+            and action == "CREATE"
+            and any(str(item.get("symbol") or "") == symbol for item in position_rows)
+        ):
+            raise ControlledLiveBlocked("A position for this symbol already exists")
         if not risk_reducing and action == "CREATE":
             orders = await self._http.private_get(
                 "/v5/order/realtime",
                 {"category": "linear", "settleCoin": "USDT", "openOnly": 0, "limit": 50},
             )
-            if orders.get("list"):
-                raise ControlledLiveBlocked("An open Bybit order already exists")
+            if any(
+                not _bool(item.get("reduceOnly"))
+                for item in orders.get("list") or []
+            ):
+                raise ControlledLiveBlocked("A pending Bybit entry order already exists")
 
         wallet = await self._http.private_get(
             "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"}
         )
         accounts = wallet.get("list") or []
         equity = _decimal(accounts[0].get("totalEquity")) if accounts else Decimal()
-        executions = await self._http.private_get(
-            "/v5/execution/list",
-            {
-                "category": "linear",
-                "startTime": _utc_day_start_ms(),
-                "limit": 100,
-            },
-        )
+        execution_rows = await self._daily_executions()
         daily_pnl = sum(
             (
                 _decimal(item.get("execPnl")) - abs(_decimal(item.get("execFee")))
-                for item in executions.get("list") or []
+                for item in execution_rows
             ),
             Decimal(),
         )
         if not risk_reducing:
             if equity <= 0:
                 raise ControlledLiveBlocked("Account equity must be positive")
-            experiment_start_equity, starting_day_equity = ControlledLiveRepository(
+            experiment_start_equity, _starting_day_equity = ControlledLiveRepository(
                 self._sessions
             ).refresh_loss_baselines(equity, daily_pnl)
-            if daily_pnl <= -(
-                starting_day_equity * CONTROLLED_LIVE_V1.daily_loss_limit_pct
-            ):
-                raise ControlledLiveBlocked("Daily loss limit reached")
+            if action != "PROTECTION":
+                open_planned_risk = _open_positions_planned_risk(position_rows)
+                new_planned_risk = _decimal(preview.get("maximum_planned_loss"))
+                daily_realized_loss = max(Decimal(), -daily_pnl)
+                if (
+                    daily_realized_loss
+                    + open_planned_risk
+                    + new_planned_risk
+                    > CONTROLLED_LIVE_V1.daily_max_loss_usdt
+                ):
+                    raise ControlledLiveBlocked("WAIT: DAILY RISK BUDGET")
+            else:
+                open_planned_risk = Decimal()
             if (
                 experiment_start_equity - equity
                 >= CONTROLLED_LIVE_V1.total_experiment_loss_limit
@@ -357,7 +372,7 @@ class ProductionMutationGuard:
                 raise ControlledLiveBlocked(
                     "Total controlled-live experiment loss limit reached; kill switch activated"
                 )
-            closed_results = _closed_order_results(executions.get("list") or [])
+            closed_results = _closed_order_results(execution_rows)
             consecutive_losses = 0
             for _, pnl, _closed_at in closed_results:
                 if pnl >= 0:
@@ -367,7 +382,29 @@ class ProductionMutationGuard:
                 raise ControlledLiveBlocked(
                     "Consecutive-loss stop is active until the next UTC day"
                 )
-        return GuardSnapshot(ask, open_positions, equity, daily_pnl)
+        else:
+            open_planned_risk = Decimal()
+        return GuardSnapshot(ask, open_positions, equity, daily_pnl, open_planned_risk)
+
+    async def _daily_executions(self) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "category": "linear",
+            "startTime": _utc_day_start_ms(),
+            "limit": 100,
+        }
+        rows: list[dict[str, Any]] = []
+        seen_cursors: set[str] = set()
+        for _ in range(50):
+            page = await self._http.private_get("/v5/execution/list", params)
+            rows.extend(page.get("list") or [])
+            cursor = str(page.get("nextPageCursor") or "")
+            if not cursor:
+                return rows
+            if cursor in seen_cursors:
+                raise ControlledLiveBlocked("Bybit execution pagination cursor repeated")
+            seen_cursors.add(cursor)
+            params = params | {"cursor": cursor}
+        raise ControlledLiveBlocked("Bybit daily executions exceed the safe pagination limit")
 
     def _persistent_checks(
         self, client_order_id: str
@@ -1089,10 +1126,50 @@ def _decimal(value: Any) -> Decimal:
     return Decimal(str(value or "0"))
 
 
+def _bool(value: Any) -> bool:
+    return value is True or str(value).strip().lower() == "true"
+
+
 def _ceil_step(value: Decimal, step: Decimal) -> Decimal:
     if step <= 0:
         return Decimal()
     return (value / step).to_integral_value(rounding=ROUND_CEILING) * step
+
+
+def _open_positions_planned_risk(positions: list[dict[str, Any]]) -> Decimal:
+    """Worst planned loss to native SL plus remaining exit costs.
+
+    Entry fees/slippage are already reflected in executions/equity and are not
+    counted again here.
+    """
+    total = Decimal()
+    for item in positions:
+        size = _decimal(item.get("size"))
+        if size <= 0:
+            continue
+        entry = _decimal(item.get("avgPrice") or item.get("entryPrice"))
+        stop = _decimal(item.get("stopLoss"))
+        target = _decimal(item.get("takeProfit"))
+        side = str(item.get("side") or "")
+        valid_protection = (
+            entry > 0
+            and stop > 0
+            and target > 0
+            and (
+                (side == "Buy" and stop < entry < target)
+                or (side == "Sell" and target < entry < stop)
+            )
+        )
+        if not valid_protection:
+            raise ControlledLiveBlocked(
+                "Existing position is missing valid exchange-native SL/TP"
+            )
+        price_loss = abs(entry - stop) * size
+        exit_cost = stop * size * (
+            BYBIT_TAKER_FEE_RATE + CONTROLLED_LIVE_V1.estimated_slippage_per_leg
+        )
+        total += price_loss + exit_cost
+    return total
 
 
 def _closed_order_results(

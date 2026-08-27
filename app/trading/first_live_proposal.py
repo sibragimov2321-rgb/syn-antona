@@ -221,8 +221,8 @@ class FirstLiveProposalRepository:
             state.updated_at = now
         return True
 
-    def release_closed_position_for_automatic_scan(self) -> None:
-        """Advance only after Bybit reports no position/order for the prior trade."""
+    def release_position_slot_for_automatic_scan(self) -> None:
+        """Release the proposal slot after the caller verifies spare Bybit capacity."""
         with self.session_factory.begin() as session:
             state = session.get(FirstLiveProposalStateRecord, CONTROLLED_LIVE_V1.name)
             controlled = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
@@ -238,6 +238,10 @@ class FirstLiveProposalRepository:
             state.status = "AUTO_RUNNING"
             state.last_error = None
             state.updated_at = datetime.now(UTC)
+
+    def release_closed_position_for_automatic_scan(self) -> None:
+        """Backward-compatible alias for the former single-position flow."""
+        self.release_position_slot_for_automatic_scan()
 
     def mark_notified(self, proposal_id: str) -> None:
         with self.session_factory.begin() as session:
