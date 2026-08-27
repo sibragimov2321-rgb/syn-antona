@@ -910,10 +910,10 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
             for item in statuses
             if item.status not in {"ИСКЛЮЧЕН", "НЕТ ДАННЫХ"}
         ]
-        closest = sorted(
-            eligible,
-            key=lambda item: (-item.signal_score, SCANNER_CONFIG.symbols.index(item.symbol)),
-        )[0] if eligible else None
+        closest_score = max((item.signal_score for item in eligible), default=0)
+        closest_symbols = tuple(
+            item.symbol for item in eligible if item.signal_score == closest_score
+        )
         runtime = session.get(SignalWaitRuntimeRecord, CONTROLLED_LIVE_V1.name)
         controlled = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
         equity = Decimal(runtime.equity) if runtime and runtime.equity is not None else None
@@ -967,10 +967,10 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
         short_candidates,
         rejects,
         best,
-        closest.symbol if closest else "НЕТ",
-        closest.signal_score if closest else 0,
-        max(0, CONTROLLED_LIVE_V1.signal_threshold - closest.signal_score)
-        if closest
+        " / ".join(closest_symbols) if closest_symbols else "НЕТ",
+        closest_score,
+        max(0, CONTROLLED_LIVE_V1.signal_threshold - closest_score)
+        if closest_symbols
         else CONTROLLED_LIVE_V1.signal_threshold,
         last_analysis,
         equity,
