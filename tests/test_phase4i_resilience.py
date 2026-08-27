@@ -9,7 +9,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.backtest.core import Candle
-from app.db import Base, ShadowCandleRecord, ShadowQuoteRecord
+from app.db import (
+    Base,
+    ControlledLiveRuntimeRecord,
+    ShadowCandleRecord,
+    ShadowQuoteRecord,
+)
 from app.shadow.engine import PROTOCOL_ID
 from app.shadow.market import PublicLiveMarketData
 from app.shadow.protocol import canonical_json, verify_existing_lock, warmup_hash
@@ -21,6 +26,7 @@ from app.shadow.watchdog import check_health
 from app.shadow.warmup_bundle import export_warmup_bundle, load_warmup_bundle
 from app.shadow.runner import _update_exchange_health, _wait_for_collector_lease
 from app.strategy_lab.phase4g import FROZEN_CONFIG_HASH
+from app.trading.controlled_universe import PROFILE_NAME
 
 
 def _repository(url: str | None = None) -> ShadowRepository:
@@ -146,7 +152,7 @@ async def test_rolling_deploy_waits_for_lease_without_collector_crash(monkeypatc
     assert repository.collector_state(PROTOCOL_ID).instance_id == "new"
 
 
-def test_status_uses_runtime_flags_from_active_execution_lease() -> None:
+def test_old_shadow_lease_cannot_rearm_execution_status() -> None:
     repository = _repository()
     now = datetime.now(UTC)
     _save_protocol(repository, _protocol(now))
@@ -165,17 +171,41 @@ def test_status_uses_runtime_flags_from_active_execution_lease() -> None:
 
     status = system_status(repository, now)
     runtime = status["execution_runtime"]
-    assert runtime["shadow"] == "ACTIVE"
+    assert runtime["shadow"] == "DISABLED"
+    assert runtime["controlled_live"] == "DISARMED"
+    assert runtime["real_order_execution"] == "DISABLED"
+    assert status["live_trading"] == "OFF"
+    text = telegram_system_status(repository)
+    assert "SHADOW: <b>DISABLED</b>" in text
+    assert "CONTROLLED LIVE: <b>DISARMED</b>" in text
+    assert "REAL ORDER EXECUTION: <b>DISABLED</b>" in text
+
+
+def test_dedicated_controlled_worker_arms_independently_of_shadow() -> None:
+    repository = _repository()
+    now = datetime.now(UTC)
+    _save_protocol(repository, _protocol(now))
+    with repository.session_factory.begin() as session:
+        session.add(
+            ControlledLiveRuntimeRecord(
+                profile_name=PROFILE_NAME,
+                instance_id="controlled-1",
+                status="RUNNING",
+                started_at=now,
+                heartbeat_at=now,
+                dry_run=False,
+                live_trading_enabled=True,
+                controlled_live_enabled=True,
+                manual_first_order_approved=True,
+                real_order_execution_enabled=True,
+                deployment_id="deployment-controlled",
+                updated_at=now,
+            )
+        )
+    runtime = system_status(repository, now)["execution_runtime"]
+    assert runtime["shadow"] == "DISABLED"
     assert runtime["controlled_live"] == "ARMED"
     assert runtime["real_order_execution"] == "ENABLED"
-    assert status["live_trading"] == "ON"
-    text = telegram_system_status(repository)
-    assert "SHADOW: <b>ACTIVE</b>" in text
-    assert "CONTROLLED LIVE: <b>ARMED</b>" in text
-    assert "REAL ORDER EXECUTION: <b>ENABLED</b>" in text
-    assert "DRY_RUN=false" in text
-    assert "LIVE_TRADING_ENABLED=true" in text
-    assert "CONTROLLED_LIVE_ENABLED=true" in text
 
 
 def test_daily_snapshot_is_updated_not_duplicated() -> None:
@@ -236,7 +266,7 @@ def test_system_status_preserves_live_off() -> None:
     status = system_status(repository, now)
     assert status["protocol"] == "LOCKED"
     assert status["live_trading"] == "OFF"
-    assert status["collector_status"] == "OFFLINE"
+    assert status["collector_status"] == "DISABLED"
 
 
 def test_existing_lock_verification_has_no_automatic_creation(tmp_path, monkeypatch) -> None:

@@ -26,7 +26,8 @@ services:
       - "60"
     volumes:
       - ./runtime:/runtime
-    restart: unless-stopped
+    profiles: ["shadow-manual"]
+    restart: "no"
     healthcheck:
       test:
         - CMD

@@ -6,19 +6,11 @@ import sys
 
 def command_for_role(role: str) -> list[str]:
     if role == "shadow":
-        return [
-            sys.executable,
-            "-m",
-            "app.shadow.supervisor",
-            "--protocol-lock",
-            "/app/phase4i-prospective-lock.json",
-            "--warmup-file",
-            "/app/phase4i-warmup.json.gz",
-            "--poll-seconds",
-            "60",
-            "--watchdog-seconds",
-            "30",
-        ]
+        # Production-safe fail-closed compatibility role: no collector, lease,
+        # watchdog, alerts, or trading process is started.
+        return [sys.executable, "-m", "app.shadow.disabled"]
+    if role == "controlled_live":
+        return [sys.executable, "-m", "app.trading.controlled_live_runner"]
     if role == "telegram":
         return [sys.executable, "-m", "app.telegram.runner"]
     if role == "bybit_preflight":
@@ -27,7 +19,9 @@ def command_for_role(role: str) -> list[str]:
 
 
 def main() -> None:
-    command = command_for_role(os.getenv("SERVICE_ROLE", "shadow").strip().lower())
+    command = command_for_role(
+        os.getenv("SERVICE_ROLE", "controlled_live").strip().lower()
+    )
     os.execv(command[0], command)
 
 

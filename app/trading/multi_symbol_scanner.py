@@ -1,10 +1,4 @@
-"""Prospective multi-symbol scanner for the frozen Phase 4G strategy.
-
-The scanner consumes only decisions already persisted by ``ProspectiveShadowEngine``.
-It cannot invoke the strategy, Risk Manager, or any mutating Bybit endpoint.  The
-separate proposal coordinator performs a fresh GET-only validation and stores at
-most one admin-review preview.
-"""
+"""Controlled-live multi-symbol scanner for the frozen Phase 4G strategy."""
 
 from __future__ import annotations
 
@@ -23,6 +17,8 @@ from sqlalchemy.orm import Session
 
 from app.db import (
     ControlledLiveStateRecord,
+    ControlledLiveRuntimeRecord,
+    ControlledLiveSignalRecord,
     ControlledLiveProposalRecord,
     ExecutionOrderRecord,
     FirstLiveProposalStateRecord,
@@ -37,7 +33,7 @@ from app.exchanges.bybit_readonly import BybitMainnetReadOnlyClient
 from app.exchanges.bybit_v5_gateway import _open_positions_planned_risk
 from app.exchanges.models import InstrumentRules, OrderSide
 from app.shadow.engine import PROTOCOL_ID
-from app.shadow.status import execution_runtime_status
+from app.shadow.status import controlled_execution_runtime_status
 from app.strategy_lab.phase4g import FROZEN_CONFIG_HASH, FROZEN_VERSION
 from app.trading.controlled_live import (
     CONTROLLED_LIVE_V1,
@@ -518,42 +514,79 @@ class MultiSymbolScannerRepository:
             ):
                 return ()
             filters = [
-                ShadowDecisionRecord.protocol_id == PROTOCOL_ID,
-                ShadowDecisionRecord.exchange == "bybit",
-                ShadowDecisionRecord.symbol.in_(SCANNER_INTERNAL_SYMBOLS),
-                ShadowDecisionRecord.decision.in_(("LONG", "SHORT")),
-                ShadowDecisionRecord.risk_status == "ALLOW",
-                ShadowDecisionRecord.signal_score >= CONTROLLED_LIVE_V1.signal_threshold,
-                ShadowDecisionRecord.strategy_hash == FROZEN_CONFIG_HASH,
-                ShadowDecisionRecord.created_at > state.started_at,
+                ControlledLiveSignalRecord.profile_name == PROFILE_NAME,
+                ControlledLiveSignalRecord.symbol.in_(SCANNER_INTERNAL_SYMBOLS),
+                ControlledLiveSignalRecord.decision.in_(("LONG", "SHORT")),
+                ControlledLiveSignalRecord.risk_status == "ALLOW",
+                ControlledLiveSignalRecord.signal_score >= CONTROLLED_LIVE_V1.signal_threshold,
+                ControlledLiveSignalRecord.strategy_hash == FROZEN_CONFIG_HASH,
+                ControlledLiveSignalRecord.created_at > state.started_at,
             ]
             if state.last_scanned_candle_open is not None:
                 filters.append(
-                    ShadowDecisionRecord.candle_open_time
+                    ControlledLiveSignalRecord.candle_open_time
                     > state.last_scanned_candle_open
                 )
             first_candle = session.scalar(
-                select(ShadowDecisionRecord.candle_open_time)
+                select(ControlledLiveSignalRecord.candle_open_time)
                 .where(*filters)
-                .order_by(ShadowDecisionRecord.candle_open_time)
+                .order_by(ControlledLiveSignalRecord.candle_open_time)
                 .limit(1)
             )
             if first_candle is None:
-                return ()
-            rows = session.execute(
-                select(ShadowDecisionRecord, ShadowTradeRecord)
-                .join(
-                    ShadowTradeRecord,
-                    ShadowTradeRecord.decision_id == ShadowDecisionRecord.id,
+                # Read-only compatibility for databases/tests created before
+                # migration 18. Production no longer creates these rows.
+                legacy_filters = [
+                    ShadowDecisionRecord.protocol_id == PROTOCOL_ID,
+                    ShadowDecisionRecord.exchange == "bybit",
+                    ShadowDecisionRecord.symbol.in_(SCANNER_INTERNAL_SYMBOLS),
+                    ShadowDecisionRecord.decision.in_(("LONG", "SHORT")),
+                    ShadowDecisionRecord.risk_status == "ALLOW",
+                    ShadowDecisionRecord.signal_score
+                    >= CONTROLLED_LIVE_V1.signal_threshold,
+                    ShadowDecisionRecord.strategy_hash == FROZEN_CONFIG_HASH,
+                    ShadowDecisionRecord.created_at > state.started_at,
+                ]
+                if state.last_scanned_candle_open is not None:
+                    legacy_filters.append(
+                        ShadowDecisionRecord.candle_open_time
+                        > state.last_scanned_candle_open
+                    )
+                first_candle = session.scalar(
+                    select(ShadowDecisionRecord.candle_open_time)
+                    .where(*legacy_filters)
+                    .order_by(ShadowDecisionRecord.candle_open_time)
+                    .limit(1)
                 )
-                .where(*filters, ShadowDecisionRecord.candle_open_time == first_candle)
-                .order_by(ShadowDecisionRecord.symbol)
+                if first_candle is None:
+                    return ()
+                legacy_rows = session.execute(
+                    select(ShadowDecisionRecord, ShadowTradeRecord)
+                    .join(
+                        ShadowTradeRecord,
+                        ShadowTradeRecord.decision_id == ShadowDecisionRecord.id,
+                    )
+                    .where(
+                        *legacy_filters,
+                        ShadowDecisionRecord.candle_open_time == first_candle,
+                    )
+                    .order_by(ShadowDecisionRecord.symbol)
+                ).all()
+                result = []
+                for decision, trade in legacy_rows:
+                    session.expunge(decision)
+                    session.expunge(trade)
+                    result.append(FrozenSignalCandidate(decision, trade))
+                return tuple(result)
+            rows = session.scalars(
+                select(ControlledLiveSignalRecord)
+                .where(*filters, ControlledLiveSignalRecord.candle_open_time == first_candle)
+                .order_by(ControlledLiveSignalRecord.symbol)
             ).all()
             result = []
-            for decision, trade in rows:
+            for decision in rows:
                 session.expunge(decision)
-                session.expunge(trade)
-                result.append(FrozenSignalCandidate(decision, trade))
+                result.append(FrozenSignalCandidate(decision, decision))
             return tuple(result)
 
     def mark_batch_scanned(self, candle_open: datetime, reason: str = "") -> None:
@@ -894,28 +927,51 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
     latest_close = None
     last_analysis = None
     with session_factory() as session:
-        daily_filters = [
-            ShadowDecisionRecord.protocol_id == PROTOCOL_ID,
-            ShadowDecisionRecord.exchange == "bybit",
-            ShadowDecisionRecord.symbol.in_(SCANNER_INTERNAL_SYMBOLS),
-            ShadowDecisionRecord.created_at >= today,
+        controlled_daily_filters = [
+            ControlledLiveSignalRecord.profile_name == PROFILE_NAME,
+            ControlledLiveSignalRecord.symbol.in_(SCANNER_INTERNAL_SYMBOLS),
+            ControlledLiveSignalRecord.created_at >= today,
         ]
-        analyses = int(session.scalar(select(func.count()).select_from(ShadowDecisionRecord).where(*daily_filters)) or 0)
-        long_candidates = int(session.scalar(select(func.count()).select_from(ShadowDecisionRecord).where(*daily_filters, ShadowDecisionRecord.decision == "LONG", ShadowDecisionRecord.risk_status == "ALLOW")) or 0)
-        short_candidates = int(session.scalar(select(func.count()).select_from(ShadowDecisionRecord).where(*daily_filters, ShadowDecisionRecord.decision == "SHORT", ShadowDecisionRecord.risk_status == "ALLOW")) or 0)
-        rejects = int(session.scalar(select(func.count()).select_from(ShadowDecisionRecord).where(*daily_filters, ShadowDecisionRecord.decision.in_(("LONG", "SHORT")), ShadowDecisionRecord.risk_status == "REJECT")) or 0)
+        controlled_total = int(session.scalar(select(func.count()).select_from(ControlledLiveSignalRecord).where(*controlled_daily_filters)) or 0)
+        use_controlled = controlled_total > 0
+        if use_controlled:
+            model = ControlledLiveSignalRecord
+            daily_filters = controlled_daily_filters
+        else:
+            model = ShadowDecisionRecord
+            daily_filters = [
+                ShadowDecisionRecord.protocol_id == PROTOCOL_ID,
+                ShadowDecisionRecord.exchange == "bybit",
+                ShadowDecisionRecord.symbol.in_(SCANNER_INTERNAL_SYMBOLS),
+                ShadowDecisionRecord.created_at >= today,
+            ]
+        analyses = int(session.scalar(select(func.count()).select_from(model).where(*daily_filters)) or 0)
+        long_candidates = int(session.scalar(select(func.count()).select_from(model).where(*daily_filters, model.decision == "LONG", model.risk_status == "ALLOW")) or 0)
+        short_candidates = int(session.scalar(select(func.count()).select_from(model).where(*daily_filters, model.decision == "SHORT", model.risk_status == "ALLOW")) or 0)
+        rejects = int(session.scalar(select(func.count()).select_from(model).where(*daily_filters, model.decision.in_(("LONG", "SHORT")), model.risk_status == "REJECT")) or 0)
         best_rows = []
         for symbol, internal in zip(SCANNER_CONFIG.symbols, SCANNER_INTERNAL_SYMBOLS, strict=True):
-            decision = session.scalar(
-                select(ShadowDecisionRecord)
-                .where(
-                    ShadowDecisionRecord.protocol_id == PROTOCOL_ID,
-                    ShadowDecisionRecord.exchange == "bybit",
-                    ShadowDecisionRecord.symbol == internal,
+            if use_controlled:
+                decision = session.scalar(
+                    select(ControlledLiveSignalRecord)
+                    .where(
+                        ControlledLiveSignalRecord.profile_name == PROFILE_NAME,
+                        ControlledLiveSignalRecord.symbol == internal,
+                    )
+                    .order_by(ControlledLiveSignalRecord.candle_open_time.desc())
+                    .limit(1)
                 )
-                .order_by(ShadowDecisionRecord.candle_open_time.desc())
-                .limit(1)
-            )
+            else:
+                decision = session.scalar(
+                    select(ShadowDecisionRecord)
+                    .where(
+                        ShadowDecisionRecord.protocol_id == PROTOCOL_ID,
+                        ShadowDecisionRecord.exchange == "bybit",
+                        ShadowDecisionRecord.symbol == internal,
+                    )
+                    .order_by(ShadowDecisionRecord.candle_open_time.desc())
+                    .limit(1)
+                )
             instrument = instruments.get(symbol)
             if instrument is not None and not instrument.enabled:
                 status = "ИСКЛЮЧЕН"
@@ -984,7 +1040,10 @@ def scanner_status(session_factory: Callable[[], Session], now: datetime | None 
         )
         controlled = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
         collector = session.get(ShadowCollectorStateRecord, PROTOCOL_ID)
-        execution_runtime = execution_runtime_status(collector, current)
+        controlled_runtime = session.get(ControlledLiveRuntimeRecord, PROFILE_NAME)
+        execution_runtime = controlled_execution_runtime_status(
+            collector, controlled_runtime, current
+        )
         equity = (
             Decimal(runtime_account.equity)
             if runtime_account and runtime_account.equity is not None
@@ -1167,7 +1226,9 @@ def format_scanner_wait_reasons_ru(status: MultiSymbolScannerStatus) -> str:
     return "\n".join(lines)
 
 
-def _persisted_decision_reason(decision: ShadowDecisionRecord) -> str:
+def _persisted_decision_reason(
+    decision: ControlledLiveSignalRecord | ShadowDecisionRecord,
+) -> str:
     reasons: list[str] = []
     if decision.risk_reason:
         reasons.append(str(decision.risk_reason))

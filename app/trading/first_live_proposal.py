@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 import json
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -59,8 +59,10 @@ class CandidateRejected(ControlledLiveBlocked):
 
 @dataclass(frozen=True)
 class FrozenSignalCandidate:
-    decision: ShadowDecisionRecord
-    trade: ShadowTradeRecord
+    # Both legacy one-symbol tests and the dedicated controlled-live signal
+    # record expose this small attribute surface.
+    decision: Any
+    trade: Any
 
 
 @dataclass(frozen=True)

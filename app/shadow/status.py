@@ -2,8 +2,10 @@ from datetime import UTC, datetime
 import json
 
 from app.core.config import get_settings
+from app.db import ControlledLiveRuntimeRecord
 from app.shadow.engine import PROTOCOL_ID
 from app.shadow.repository import ShadowRepository
+from app.trading.controlled_universe import PROFILE_NAME
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -49,6 +51,51 @@ def execution_runtime_status(state, now: datetime | None = None) -> dict:
     }
 
 
+def controlled_execution_runtime_status(
+    shadow_state, controlled_state, now: datetime | None = None
+) -> dict:
+    """Report the two runtimes independently after production separation."""
+    current = now or datetime.now(UTC)
+    settings = get_settings()
+    heartbeat = _utc(controlled_state.heartbeat_at) if controlled_state else None
+    running = bool(
+        controlled_state
+        and controlled_state.status == "RUNNING"
+        and heartbeat
+        and (current - heartbeat).total_seconds()
+        <= settings.shadow_heartbeat_max_age_seconds
+    )
+    dry_run = controlled_state.dry_run if controlled_state else None
+    live = controlled_state.live_trading_enabled if controlled_state else None
+    controlled = (
+        controlled_state.controlled_live_enabled if controlled_state else None
+    )
+    manual = (
+        controlled_state.manual_first_order_approved if controlled_state else None
+    )
+    real_execution = bool(
+        running
+        and controlled_state
+        and controlled_state.real_order_execution_enabled
+        and dry_run is False
+        and live is True
+        and controlled is True
+        and manual is True
+    )
+    return {
+        "shadow": "ACTIVE" if settings.shadow_execution_enabled else "DISABLED",
+        "controlled_live": "ARMED" if real_execution else "DISARMED",
+        "real_order_execution": "ENABLED" if real_execution else "DISABLED",
+        "dry_run": dry_run,
+        "live_trading_enabled": live,
+        "controlled_live_enabled": controlled,
+        "manual_first_order_approved": manual,
+        "deployment_id": controlled_state.deployment_id if controlled_state else None,
+        "replica_id": None,
+        "last_start_cause": "DEDICATED_CONTROLLED_LIVE_WORKER" if running else None,
+    }
+
+
 def system_status(
     repository: ShadowRepository, now: datetime | None = None
 ) -> dict:
@@ -58,11 +105,13 @@ def system_status(
         return {"protocol": "MISSING", "live_trading": "OFF"}
     locked_at = _utc(protocol.locked_at)
     state = repository.collector_state(PROTOCOL_ID)
+    with repository.session_factory() as session:
+        controlled_state = session.get(ControlledLiveRuntimeRecord, PROFILE_NAME)
     health = repository.exchange_health(PROTOCOL_ID)
     counts = repository.decision_counts(PROTOCOL_ID)
     latest = repository.latest_candle(PROTOCOL_ID)
     closed = repository.closed_trades(PROTOCOL_ID)
-    runtime = execution_runtime_status(state, current)
+    runtime = controlled_execution_runtime_status(state, controlled_state, current)
     return {
         "validation_day": max(1, int((current - locked_at).total_seconds() // 86400) + 1),
         "minimum_days": 30,
@@ -88,7 +137,9 @@ def system_status(
         "short": counts["SHORT"],
         "open_positions": len(repository.open_trades(PROTOCOL_ID)),
         "closed_positions": len(closed),
-        "collector_status": state.status if state else "OFFLINE",
+        "collector_status": (
+            state.status if get_settings().shadow_execution_enabled and state else "DISABLED"
+        ),
         "collector_started_at": _utc(state.started_at) if state else None,
         "collector_uptime_seconds": (
             max(0, int((current - _utc(state.started_at)).total_seconds()))
@@ -119,7 +170,7 @@ def telegram_system_status(repository: ShadowRepository) -> str:
     uptime = values["collector_uptime_seconds"]
     runtime = values["execution_runtime"]
     return (
-        "🟢 <b>СОСТОЯНИЕ SHADOW-СИСТЕМЫ</b>\n\n"
+        "⏸ <b>СОСТОЯНИЕ SHADOW-СИСТЕМЫ</b>\n\n"
         f"SHADOW: <b>{runtime['shadow']}</b>\n"
         f"CONTROLLED LIVE: <b>{runtime['controlled_live']}</b>\n"
         "REAL ORDER EXECUTION: "

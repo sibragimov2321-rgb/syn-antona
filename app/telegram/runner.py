@@ -269,7 +269,8 @@ async def actions(callback: CallbackQuery) -> None:
             metrics = shadow_metrics(closed)
             text = (
                 "📊 <b>SHADOW REPORT — 30 DAYS</b>\n\n"
-                "Режим: отдельное prospective SHADOW-наблюдение\n"
+                "Режим: ОТКЛЮЧЕН; ниже только сохранённые архивные данные\n"
+                "Collector: 0 | Watchdog: OFF | Auto-restart: OFF\n"
                 "Стратегия: расширение волатильности, 1 час\n"
                 f"Дней наблюдения: {days:.2f}\n"
                 f"Сигналов: {repository.decisions_count(PROTOCOL_ID, signals_only=True)}\n"

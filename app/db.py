@@ -284,6 +284,58 @@ class MultiSymbolScannerInstrumentRecord(Base):
     )
 
 
+class ControlledLiveSignalRecord(Base):
+    """Closed-candle frozen-strategy decision owned by Controlled Live, not Shadow."""
+
+    __tablename__ = "controlled_live_signals"
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_name", "symbol", "candle_open_time",
+            name="uq_controlled_live_signal",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    profile_name: Mapped[str] = mapped_column(String(64), index=True)
+    strategy_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    candle_open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    signal_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decision: Mapped[str] = mapped_column(String(8))
+    signal_score: Mapped[int] = mapped_column(Integer, default=0)
+    decision_price: Mapped[Decimal] = mapped_column(Numeric(24, 10))
+    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(24, 10), nullable=True)
+    take_profit: Mapped[Decimal | None] = mapped_column(Numeric(24, 10), nullable=True)
+    risk_status: Mapped[str] = mapped_column(String(16), default="NOT_APPLICABLE")
+    risk_reason: Mapped[str] = mapped_column(Text, default="")
+    context_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
+class ControlledLiveRuntimeRecord(Base):
+    """Heartbeat and actual flags from the dedicated Controlled Live worker."""
+
+    __tablename__ = "controlled_live_runtime"
+
+    profile_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    live_trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    controlled_live_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    manual_first_order_approved: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    real_order_execution_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    deployment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
 class HistoricalCandleRecord(Base):
     __tablename__ = "historical_candles"
     __table_args__ = (

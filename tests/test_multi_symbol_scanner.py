@@ -652,7 +652,7 @@ def test_status_lists_exact_allowlist_and_uses_persisted_decisions_only():
     text = format_scanner_status_ru(value)
     reasons = format_scanner_wait_reasons_ru(value)
     assert "CONTROLLED LIVE STATUS" in text
-    assert "SHADOW: <b>INACTIVE</b>" in text
+    assert "SHADOW: <b>DISABLED</b>" in text
     assert "CONTROLLED LIVE: <b>DISARMED</b>" in text
     assert "REAL ORDER EXECUTION: <b>DISABLED</b>" in text
     assert "Threshold: 70" in text

@@ -19,42 +19,20 @@ services:
         max-size: "20m"
         max-file: "5"
 
-  shadow:
+  controlled-live:
     build: .
     env_file: .env.production
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-trader}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-trader}
-      LIVE_TRADING_ENABLED: "false"
-    command:
-      - python
-      - -m
-      - app.shadow.supervisor
-      - --protocol-lock
-      - /runtime/phase4i-prospective-lock.json
-      - --warmup-file
-      - /runtime/phase4i-warmup.json.gz
-      - --poll-seconds
-      - "60"
-    volumes:
-      - ./runtime:/runtime
+      SERVICE_ROLE: controlled_live
+      SHADOW_EXECUTION_ENABLED: "false"
+    command: ["python", "-m", "app.trading.controlled_live_runner"]
     depends_on:
       db:
         condition: service_healthy
     init: true
     stop_grace_period: 45s
     restart: unless-stopped
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -m
-        - app.shadow.watchdog
-        - --protocol-lock
-        - /runtime/phase4i-prospective-lock.json
-      interval: 60s
-      timeout: 20s
-      retries: 3
-      start_period: 10m
     logging:
       driver: json-file
       options:
@@ -67,6 +45,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-trader}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-trader}
       LIVE_TRADING_ENABLED: "false"
+      SHADOW_EXECUTION_ENABLED: "false"
     command: ["python", "-m", "app.telegram.runner"]
     depends_on:
       db:
