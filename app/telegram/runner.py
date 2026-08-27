@@ -1,19 +1,13 @@
 import asyncio
-from datetime import UTC, datetime
+from decimal import Decimal
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.db import SessionLocal
-from app.demo import DemoAutotrader
-from app.domain.models import BotState
-from app.market.synthetic import SyntheticDemoData
-from app.shadow.engine import PROTOCOL_ID
-from app.shadow.repository import ShadowRepository, shadow_metrics
-from app.shadow.status import telegram_system_status
-from app.statistics import calculate_statistics
+from app.db import ExecutionOrderRecord, SessionLocal
 from app.trading.controlled_live import ControlledLiveRepository
 from app.trading.first_live_proposal import (
     FROZEN_SIGNAL_SOURCE,
@@ -26,8 +20,6 @@ from app.trading.multi_symbol_scanner import (
 )
 
 router = Router()
-demo = DemoAutotrader()
-demo_task: asyncio.Task | None = None
 
 
 def is_admin_telegram_user(user_id: int, admin_ids: set[int]) -> bool:
@@ -38,43 +30,16 @@ def activate_persistent_execution_kill_switch() -> None:
     ControlledLiveRepository(SessionLocal).activate_kill_switch()
 
 
-async def run_demo_notifications(bot: Bot, chat_id: int) -> None:
-    """Telegram-facing DEMO loop; its data source is explicitly synthetic in Phase 2."""
-    provider = SyntheticDemoData()
-    while demo.state is not BotState.EMERGENCY_STOP:
-        if demo.state is BotState.ACTIVE:
-            for symbol in ("BTCUSDT", "ETHUSDT"):
-                frames = await provider.frames(symbol)
-                signal, position = demo.process(symbol, frames)
-                if position:
-                    await bot.send_message(
-                        chat_id,
-                        "🟢 <b>DEMO-ПОЗИЦИЯ ОТКРЫТА</b>\n\n"
-                        f"Символ: {position.symbol}\nНаправление: {position.side}\n"
-                        f"Вход: {position.entry_price}\nРазмер позиции: {position.quantity}\n"
-                        f"Стоп-лосс: {position.stop_loss}\nТейк-профит: {position.take_profit}\n"
-                        f"Риск: {demo.profile.risk_per_trade_pct:.2%}\n"
-                        f"Риск/прибыль: {signal.risk_reward_ratio}\n"
-                        f"Оценка сигнала: {signal.signal_score}",
-                        parse_mode="HTML",
-                    )
-                for closed in demo.on_price(symbol, frames["5M"].price):
-                    await bot.send_message(
-                        chat_id,
-                        "🔴 <b>DEMO-ПОЗИЦИЯ ЗАКРЫТА</b>\n\n"
-                        f"{closed.position.symbol} {closed.position.side}\n"
-                        f"Результат: ${closed.realized_pnl}\nПричина: {closed.reason}",
-                        parse_mode="HTML",
-                    )
-        await asyncio.sleep(5)
-
-
 def dashboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="▶️ Запустить DEMO", callback_data="demo:start"),
-                InlineKeyboardButton(text="⏸ Пауза", callback_data="bot:pause"),
+                InlineKeyboardButton(
+                    text="🟢 CONTROLLED LIVE", callback_data="controlled:status"
+                ),
+                InlineKeyboardButton(
+                    text="📊 Почему WAIT?", callback_data="controlled:why"
+                ),
             ],
             [InlineKeyboardButton(text="🚨 Аварийная остановка", callback_data="bot:emergency")],
             [
@@ -86,31 +51,36 @@ def dashboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="💼 История сделок", callback_data="history"),
             ],
             [InlineKeyboardButton(text="📉 Статистика", callback_data="statistics")],
-            [
-                InlineKeyboardButton(
-                    text="📊 SHADOW REPORT", callback_data="shadow:report"
-                ),
-                InlineKeyboardButton(
-                    text="🟢 CONTROLLED LIVE STATUS", callback_data="controlled:status"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🟢 Состояние системы", callback_data="shadow:status"
-                )
-            ],
         ]
     )
 
 
 def dashboard_text() -> str:
+    status = scanner_status(SessionLocal)
     return (
         "🤖 <b>СЫН АНТОНА</b>\n\n"
-        "💰 Баланс: $10,000.00\n📈 Результат за сегодня: $0.00\n"
-        "📊 Общий результат: $0.00\n"
-        "🟡 Бот: НА ПАУЗЕ\n⚙️ Режим: DEMO\n🎯 Открытые позиции: 0\n\n"
-        "Только виртуальная торговля. Каждая сделка проходит проверку риск-менеджера."
+        "🟢 <b>CONTROLLED LIVE</b>\n"
+        f"💰 REAL TRADING: <b>{status.real_order_execution_runtime}</b>\n"
+        f"Equity: {_money(status.equity)}\n"
+        f"Positions: {_number(status.open_positions)} / 3\n"
+        f"Open orders: {_number(status.open_orders)}\n"
+        f"Trades today: {_number(status.trades_today)}\n"
+        f"Realized PnL today: {_money(status.daily_realized_pnl)}\n"
+        "Daily loss budget remaining: "
+        f"{_money(status.remaining_daily_loss)} / $5\n"
+        "Total experiment loss remaining: "
+        f"{_money(status.remaining_experiment_loss)} / $10\n\n"
+        "Threshold: 70\nRisk max: 5%\nLeverage: 2x\nMin R/R: 1:1.5\n"
+        "SHADOW: OFF | DEMO: OFF"
     )
+
+
+def _money(value: Decimal | None) -> str:
+    return f"${value.quantize(Decimal('0.0001'))}" if value is not None else "НЕДОСТУПНО"
+
+
+def _number(value: int | None) -> str:
+    return str(value) if value is not None else "НЕДОСТУПНО"
 
 
 def signal_wait_keyboard() -> InlineKeyboardMarkup:
@@ -132,11 +102,13 @@ def signal_wait_keyboard() -> InlineKeyboardMarkup:
 
 @router.message(CommandStart())
 async def start(message: Message) -> None:
+    if not is_admin_telegram_user(
+        message.from_user.id, get_settings().admin_telegram_ids
+    ):
+        await message.answer("Доступ разрешён только администратору.")
+        return
     await message.answer(
-        "Добро пожаловать в «Сын Антона».\n\n"
-        "1. Выберите DEMO\n2. Виртуальный баланс: $10,000\n"
-        "3. Пары: BTC/USDT, ETH/USDT\n4. Риск: низкий\n\n"
-        + dashboard_text(),
+        dashboard_text(),
         reply_markup=dashboard(),
         parse_mode="HTML",
     )
@@ -144,16 +116,17 @@ async def start(message: Message) -> None:
 
 @router.callback_query()
 async def actions(callback: CallbackQuery) -> None:
-    emergency_actions = {"bot:emergency", "emergency:keep", "emergency:close"}
-    shadow_private_actions = {
-        "shadow",
-        "shadow:report",
-        "shadow:signal",
-        "shadow:why",
+    admin_actions = {
+        "bot:emergency",
         "controlled:status",
         "controlled:why",
+        "positions",
+        "analysis",
+        "risk",
+        "history",
+        "statistics",
     }
-    admin_only = callback.data in emergency_actions | shadow_private_actions or bool(
+    admin_only = callback.data in admin_actions or bool(
         callback.data and callback.data.startswith("phase5e:")
     )
     if admin_only and not is_admin_telegram_user(
@@ -173,7 +146,8 @@ async def actions(callback: CallbackQuery) -> None:
                 raise PermissionError("Предложение принадлежит другому администратору.")
             if action == "approve":
                 # The Telegram process only records consent. The separately isolated
-                # shadow worker owns the gateway and re-checks every execution gate.
+                # The dedicated controlled-live worker owns the gateway and
+                # re-checks every execution gate.
                 controlled.approve(record.proposal_hash, callback.from_user.id)
                 settings = get_settings()
                 armed = (
@@ -206,44 +180,48 @@ async def actions(callback: CallbackQuery) -> None:
             return
     elif callback.data == "bot:emergency":
         activate_persistent_execution_kill_switch()
-        demo.emergency_stop()
         await callback.message.answer(
-            "🚨 АВАРИЙНАЯ ОСТАНОВКА: новые DEMO и Mainnet-входы запрещены. "
-            "Выберите действие с DEMO-позициями.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Оставить позиции", callback_data="emergency:keep"),
-                InlineKeyboardButton(text="Закрыть все DEMO-позиции", callback_data="emergency:close"),
-            ]]),
+            "🚨 HARD STOP активирован: новые Mainnet-входы запрещены. "
+            "Существующие позиции сохраняют exchange-native SL/TP."
         )
-    elif callback.data == "demo:start":
-        global demo_task
-        demo.start()
-        if demo_task is None or demo_task.done():
-            demo_task = asyncio.create_task(run_demo_notifications(callback.bot, callback.message.chat.id))
-        await callback.message.answer("DEMO запущен. Риск на сделку: 0,5%; дневной лимит убытка: 2%.")
-    elif callback.data == "bot:pause":
-        demo.pause()
-        await callback.message.answer("Поиск DEMO-сделок приостановлен. Открытые позиции остаются защищены.")
-    elif callback.data == "emergency:keep":
-        demo.emergency_stop()
-        await callback.message.answer("🚨 Поиск DEMO-сделок остановлен. Открытые позиции продолжают отслеживаться.")
-    elif callback.data == "emergency:close":
-        demo.emergency_stop(close_positions=True)
-        await callback.message.answer("🚨 Поиск DEMO-сделок остановлен, все DEMO-позиции закрыты.")
     elif callback.data == "positions":
-        positions = demo.broker.positions
-        text = "📈 <b>ОТКРЫТЫЕ ПОЗИЦИИ</b>\n\n" + ("Открытых DEMO-позиций нет." if not positions else "\n".join(
-            f"{item.symbol} {item.side}: {item.quantity} @ {item.entry_price}" for item in positions
-        ))
+        status = scanner_status(SessionLocal)
+        text = (
+            "📈 <b>РЕАЛЬНЫЕ BYBIT ПОЗИЦИИ</b>\n\n"
+            f"Positions: {_number(status.open_positions)} / 3\n"
+            f"Open orders: {_number(status.open_orders)}\n"
+            f"Equity: {_money(status.equity)}\n"
+            f"Open planned risk: {_money(status.open_planned_risk)}\n"
+            "Источник: последний приватный Bybit Mainnet reconciliation snapshot."
+        )
         await callback.message.answer(text, parse_mode="HTML")
     elif callback.data == "history":
-        records = [item for item in demo.journal.records if item.event_type != "SIGNAL"][-10:]
-        await callback.message.answer("💼 <b>ИСТОРИЯ СДЕЛОК</b>\n\n" + ("Сделок пока нет." if not records else "\n".join(
-            f"{item.event_type}: {item.symbol}" for item in records
-        )), parse_mode="HTML")
+        with SessionLocal() as session:
+            records = session.scalars(
+                select(ExecutionOrderRecord)
+                .where(ExecutionOrderRecord.exchange == "bybit")
+                .order_by(ExecutionOrderRecord.created_at.desc())
+                .limit(10)
+            ).all()
+        lines = [
+            f"{item.symbol} {item.side} {item.quantity} — {item.status}"
+            for item in records
+        ]
+        await callback.message.answer(
+            "💼 <b>MAINNET EXECUTION LEDGER</b>\n\n"
+            + ("Реальных сделок пока нет." if not lines else "\n".join(lines)),
+            parse_mode="HTML",
+        )
     elif callback.data == "statistics":
-        stats = calculate_statistics(demo.closed_positions)
-        await callback.message.answer(f"📉 <b>СТАТИСТИКА</b>\n\nСделок: {stats.trades}\nЧистый результат: ${stats.net_pnl}", parse_mode="HTML")
+        status = scanner_status(SessionLocal)
+        await callback.message.answer(
+            "📉 <b>CONTROLLED LIVE СТАТИСТИКА</b>\n\n"
+            f"Сделок сегодня: {_number(status.trades_today)}\n"
+            f"Realized PnL: {_money(status.daily_realized_pnl)}\n"
+            f"Позиции: {_number(status.open_positions)} / 3\n"
+            f"Остаток дневного лимита: {_money(status.remaining_daily_loss)}",
+            parse_mode="HTML",
+        )
     elif callback.data == "risk":
         await callback.message.answer(
             "🛡 <b>CONTROLLED LIVE — РИСК</b>\n\n"
@@ -257,52 +235,18 @@ async def actions(callback: CallbackQuery) -> None:
         )
     elif callback.data == "analysis":
         await callback.message.answer("📊 <b>АНАЛИЗ</b>\n\nИспользуются только технические правила. AI API отключён.", parse_mode="HTML")
-    elif callback.data in {"shadow", "shadow:report"}:
-        repository = ShadowRepository()
-        protocol = repository.protocol(PROTOCOL_ID)
-        if not protocol:
-            text = "👁 <b>SHADOW-ТОРГОВЛЯ</b>\n\nЗафиксированный протокол пока не найден."
-        else:
-            locked_at = protocol.locked_at.replace(tzinfo=UTC) if protocol.locked_at.tzinfo is None else protocol.locked_at
-            days = (datetime.now(UTC) - locked_at).total_seconds() / 86400
-            closed = repository.closed_trades(PROTOCOL_ID)
-            metrics = shadow_metrics(closed)
-            text = (
-                "📊 <b>SHADOW REPORT — 30 DAYS</b>\n\n"
-                "Режим: ОТКЛЮЧЕН; ниже только сохранённые архивные данные\n"
-                "Collector: 0 | Watchdog: OFF | Auto-restart: OFF\n"
-                "Стратегия: расширение волатильности, 1 час\n"
-                f"Дней наблюдения: {days:.2f}\n"
-                f"Сигналов: {repository.decisions_count(PROTOCOL_ID, signals_only=True)}\n"
-                f"Открытых shadow-позиций: {len(repository.open_trades(PROTOCOL_ID))}\n"
-                f"Закрытых shadow-позиций: {metrics['trades']}\n"
-                f"Чистый результат: ${metrics['net_pnl']}\n"
-                f"Профит-фактор: {metrics['net_pf']}\n"
-                f"Ожидаемый результат сделки: ${metrics['expectancy']}\n"
-                f"Максимальная просадка: ${metrics['max_drawdown']}\n"
-                f"Хэш протокола: <code>{protocol.protocol_hash}</code>"
-            )
-        await callback.message.answer(
-            text,
-            parse_mode="HTML",
-            reply_markup=None,
-        )
-    elif callback.data in {"shadow:signal", "controlled:status"}:
+    elif callback.data == "controlled:status":
         # Read-only refresh: no market fetch into the strategy and no decision run.
         await callback.message.answer(
             format_scanner_status_ru(scanner_status(SessionLocal)),
             parse_mode="HTML",
             reply_markup=signal_wait_keyboard(),
         )
-    elif callback.data in {"shadow:why", "controlled:why"}:
+    elif callback.data == "controlled:why":
         await callback.message.answer(
             format_scanner_wait_reasons_ru(scanner_status(SessionLocal)),
             parse_mode="HTML",
             reply_markup=signal_wait_keyboard(),
-        )
-    elif callback.data == "shadow:status":
-        await callback.message.answer(
-            telegram_system_status(ShadowRepository()), parse_mode="HTML"
         )
     else:
         await callback.message.answer("Этот раздел пока находится в разработке.")

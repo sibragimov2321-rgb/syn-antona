@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from app.db import (
     ControlledLiveRuntimeRecord,
     ControlledLiveSignalRecord,
+    ControlledLiveStateRecord,
     ExecutionOrderRecord,
     SessionLocal,
     ShadowCollectorStateRecord,
@@ -20,6 +21,13 @@ def main() -> None:
     with SessionLocal() as session:
         shadow = session.get(ShadowCollectorStateRecord, PROTOCOL_ID)
         controlled = session.get(ControlledLiveRuntimeRecord, PROFILE_NAME)
+        risk_state = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
+        latest_signal = session.scalar(
+            select(ControlledLiveSignalRecord)
+            .where(ControlledLiveSignalRecord.profile_name == PROFILE_NAME)
+            .order_by(ControlledLiveSignalRecord.signal_timestamp.desc())
+            .limit(1)
+        )
         lease_active = bool(
             shadow
             and (
@@ -44,6 +52,10 @@ def main() -> None:
             "REAL_ORDER_EXECUTION": (
                 controlled.real_order_execution_enabled if controlled else None
             ),
+            "KILL_SWITCH": (
+                "SAFE" if risk_state and not risk_state.kill_switch_active else "ACTIVE"
+            ),
+            "CURRENT_SIGNAL": latest_signal.decision if latest_signal else "NO_DATA",
             "CONTROLLED_SIGNALS": session.scalar(
                 select(func.count()).select_from(ControlledLiveSignalRecord)
             ),

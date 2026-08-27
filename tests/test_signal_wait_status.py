@@ -328,12 +328,13 @@ def test_signal_wait_keyboard_is_read_only_and_exact():
     ]
 
 
-def test_dashboard_separates_shadow_report_from_controlled_live_status():
+def test_production_dashboard_contains_only_controlled_live_actions():
     buttons = [
         button
         for row in dashboard().inline_keyboard
         for button in row
     ]
     callbacks = {button.text: button.callback_data for button in buttons}
-    assert callbacks["📊 SHADOW REPORT"] == "shadow:report"
-    assert callbacks["🟢 CONTROLLED LIVE STATUS"] == "controlled:status"
+    assert callbacks["🟢 CONTROLLED LIVE"] == "controlled:status"
+    assert "▶️ Запустить DEMO" not in callbacks
+    assert "📊 SHADOW REPORT" not in callbacks
