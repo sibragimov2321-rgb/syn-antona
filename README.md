@@ -306,3 +306,26 @@ quarter/half-year attribution, leave-one-asset/exchange-out diagnostics, cluster
 expectancy intervals, inherited multiple-testing correction and trade-count adequacy. Spot funding
 is zero. The inherited synthetic SHORT accounting has no spot-borrow model and is explicitly marked
 as a research limitation. Live trading and real orders remain disabled.
+
+## AI live activation
+
+The deployed worker keeps the existing Controlled Live engine while
+`AI_TRADING_ENABLED=false`. Autonomous AI mode starts only when the worker has
+all of these Railway variables:
+
+```dotenv
+AI_PROVIDER=openai
+AI_API_KEY=<secret>
+AI_BASE_URL=https://api.openai.com/v1
+AI_MODEL=<OpenAI-compatible model name>
+AI_TRADING_ENABLED=true
+AI_CONFIDENCE_THRESHOLD=70
+AI_SCAN_INTERVAL_SECONDS=300
+AI_POSITION_NOTIONAL_USDT=15
+```
+
+`AI_API_KEY` is never persisted in PostgreSQL or included in logs/Telegram.
+The AI emits decisions only; the existing Bybit gateway still owns deterministic
+order IDs, duplicate and balance/instrument checks, the three-position limit,
+native SL/TP verification, reconciliation, and the kill switch. Invalid AI JSON
+always means no order.

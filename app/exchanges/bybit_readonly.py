@@ -49,6 +49,7 @@ PUBLIC_GET_PATHS = frozenset(
         "/v5/market/time",
         "/v5/market/instruments-info",
         "/v5/market/tickers",
+        "/v5/market/kline",
     }
 )
 

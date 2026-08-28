@@ -336,6 +336,89 @@ class ControlledLiveRuntimeRecord(Base):
     )
 
 
+class AILiveRuntimeRecord(Base):
+    """Last durable heartbeat and account state for the autonomous AI scanner."""
+
+    __tablename__ = "ai_live_runtime"
+
+    runtime_name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="DISABLED")
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="NOT_CONFIGURED")
+    scan_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_market_data_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    equity: Mapped[Decimal | None] = mapped_column(Numeric(24, 10), nullable=True)
+    available_balance: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
+    open_positions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    open_positions_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    open_orders: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_scans: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class AILiveScanRecord(Base):
+    """One idempotent five-minute multi-symbol AI request."""
+
+    __tablename__ = "ai_live_scans"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), unique=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="RUNNING")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    account_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class AILiveDecisionRecord(Base):
+    """Validated AI output and its deterministic execution disposition."""
+
+    __tablename__ = "ai_live_decisions"
+    __table_args__ = (
+        UniqueConstraint("scan_id", "symbol", name="uq_ai_live_scan_symbol"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scan_id: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(24, 10), nullable=True)
+    take_profit: Mapped[Decimal | None] = mapped_column(Numeric(24, 10), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    disposition: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="WAIT"
+    )
+    proposal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
 class HistoricalCandleRecord(Base):
     __tablename__ = "historical_candles"
     __table_args__ = (

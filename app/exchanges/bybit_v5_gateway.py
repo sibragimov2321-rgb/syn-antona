@@ -49,6 +49,7 @@ from app.trading.execution_store import (
     OrderRejected,
 )
 from app.trading.controlled_universe import (
+    AI_SIGNAL_SOURCE,
     SCANNER_CONFIG,
     scanner_selection_hash,
 )
@@ -60,6 +61,7 @@ APPROVAL_TTL = timedelta(minutes=10)
 ALLOWED_SYMBOL = "SOLUSDT"
 ALLOWED_SYMBOLS = frozenset(SCANNER_CONFIG.symbols)
 MAX_NOTIONAL = Decimal("10")
+AI_MAX_NOTIONAL = Decimal("15")
 MUTATING_PATHS = frozenset(
     {
         "/v5/order/create",
@@ -256,6 +258,9 @@ class ProductionMutationGuard:
 
         proposal, state, _attempts_today = self._persistent_checks(client_order_id)
         preview = json.loads(proposal.preview_json)
+        ai_source = proposal.source == AI_SIGNAL_SOURCE
+        if ai_source and not get_settings().ai_trading_enabled:
+            raise ControlledLiveBlocked("AI_TRADING_ENABLED=false blocks the AI proposal")
         approved_symbol = str(preview.get("symbol") or "")
         approved_quantity = _decimal(preview.get("quantity"))
         if approved_symbol != symbol or approved_quantity <= 0:
@@ -284,23 +289,38 @@ class ProductionMutationGuard:
         minimum_notional = _decimal(lot.get("minNotionalValue"))
         if instrument.get("status") != "Trading" or instrument.get("contractType") != "LinearPerpetual":
             raise ControlledLiveBlocked(f"{symbol} LinearPerpetual is not Trading")
-        midpoint = (bid + ask) / 2
-        spread_pct = (ask - bid) / midpoint if midpoint > 0 and ask >= bid else Decimal("Infinity")
-        if spread_pct > SCANNER_CONFIG.maximum_spread_pct:
-            raise ControlledLiveBlocked("Fresh spread exceeds the frozen Risk Manager limit")
-        if _decimal(ticker.get("turnover24h")) < SCANNER_CONFIG.minimum_turnover_24h:
-            raise ControlledLiveBlocked("Fresh 24h turnover is below the immutable liquidity gate")
-        if step <= 0 or quantity % step or quantity < minimum_quantity:
-            raise ControlledLiveBlocked("Quantity violates current Bybit instrument limits")
         notional = quantity * ask
-        if notional < minimum_notional or notional > MAX_NOTIONAL:
-            raise ControlledLiveBlocked("Current order notional is outside $5-$10")
-        actual_minimum_quantity = max(
-            minimum_quantity,
-            _ceil_step(minimum_notional / ask, step) if ask > 0 else Decimal(),
-        )
-        if actual_minimum_quantity * ask > SCANNER_CONFIG.maximum_actual_minimum_notional:
-            raise ControlledLiveBlocked("Current actual minimum order exceeds $10")
+        if not risk_reducing:
+            midpoint = (bid + ask) / 2
+            spread_pct = (
+                (ask - bid) / midpoint
+                if midpoint > 0 and ask >= bid
+                else Decimal("Infinity")
+            )
+            if spread_pct > SCANNER_CONFIG.maximum_spread_pct:
+                raise ControlledLiveBlocked(
+                    "Fresh spread exceeds the production liquidity limit"
+                )
+            if _decimal(ticker.get("turnover24h")) < SCANNER_CONFIG.minimum_turnover_24h:
+                raise ControlledLiveBlocked(
+                    "Fresh 24h turnover is below the immutable liquidity gate"
+                )
+            if step <= 0 or quantity % step or quantity < minimum_quantity:
+                raise ControlledLiveBlocked("Quantity violates current Bybit instrument limits")
+            maximum_notional = AI_MAX_NOTIONAL if ai_source else MAX_NOTIONAL
+            if notional < minimum_notional or notional > maximum_notional:
+                raise ControlledLiveBlocked(
+                    f"Current order notional is outside the approved ${maximum_notional} cap"
+                )
+            actual_minimum_quantity = max(
+                minimum_quantity,
+                _ceil_step(minimum_notional / ask, step) if ask > 0 else Decimal(),
+            )
+            if (
+                actual_minimum_quantity * ask
+                > SCANNER_CONFIG.maximum_actual_minimum_notional
+            ):
+                raise ControlledLiveBlocked("Current actual minimum order exceeds $10")
 
         positions = await self._http.private_get(
             "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}
@@ -337,6 +357,11 @@ class ProductionMutationGuard:
         )
         accounts = wallet.get("list") or []
         equity = _decimal(accounts[0].get("totalEquity")) if accounts else Decimal()
+        available_balance = (
+            _decimal(accounts[0].get("totalAvailableBalance"))
+            if accounts
+            else Decimal()
+        )
         execution_rows = await self._daily_executions()
         daily_pnl = sum(
             (
@@ -348,40 +373,47 @@ class ProductionMutationGuard:
         if not risk_reducing:
             if equity <= 0:
                 raise ControlledLiveBlocked("Account equity must be positive")
-            experiment_start_equity, _starting_day_equity = ControlledLiveRepository(
-                self._sessions
-            ).refresh_loss_baselines(equity, daily_pnl)
-            if action != "PROTECTION":
-                open_planned_risk = _open_positions_planned_risk(position_rows)
-                new_planned_risk = _decimal(preview.get("maximum_planned_loss"))
-                daily_realized_loss = max(Decimal(), -daily_pnl)
-                if (
-                    daily_realized_loss
-                    + open_planned_risk
-                    + new_planned_risk
-                    > CONTROLLED_LIVE_V1.daily_max_loss_usdt
-                ):
-                    raise ControlledLiveBlocked("WAIT: DAILY RISK BUDGET")
-            else:
+            required_margin = notional / CONTROLLED_LIVE_V1.leverage
+            expected_entry_fee = notional * BYBIT_TAKER_FEE_RATE
+            if ai_source and required_margin + expected_entry_fee > available_balance:
+                raise ControlledLiveBlocked("Insufficient available balance")
+            if ai_source:
                 open_planned_risk = Decimal()
-            if (
-                experiment_start_equity - equity
-                >= CONTROLLED_LIVE_V1.total_experiment_loss_limit
-            ):
-                ControlledLiveRepository(self._sessions).activate_kill_switch()
-                raise ControlledLiveBlocked(
-                    "Total controlled-live experiment loss limit reached; kill switch activated"
-                )
-            closed_results = _closed_order_results(execution_rows)
-            consecutive_losses = 0
-            for _, pnl, _closed_at in closed_results:
-                if pnl >= 0:
-                    break
-                consecutive_losses += 1
-            if consecutive_losses >= CONTROLLED_LIVE_V1.max_consecutive_losses:
-                raise ControlledLiveBlocked(
-                    "Consecutive-loss stop is active until the next UTC day"
-                )
+            else:
+                experiment_start_equity, _starting_day_equity = ControlledLiveRepository(
+                    self._sessions
+                ).refresh_loss_baselines(equity, daily_pnl)
+                if action != "PROTECTION":
+                    open_planned_risk = _open_positions_planned_risk(position_rows)
+                    new_planned_risk = _decimal(preview.get("maximum_planned_loss"))
+                    daily_realized_loss = max(Decimal(), -daily_pnl)
+                    if (
+                        daily_realized_loss
+                        + open_planned_risk
+                        + new_planned_risk
+                        > CONTROLLED_LIVE_V1.daily_max_loss_usdt
+                    ):
+                        raise ControlledLiveBlocked("WAIT: DAILY RISK BUDGET")
+                else:
+                    open_planned_risk = Decimal()
+                if (
+                    experiment_start_equity - equity
+                    >= CONTROLLED_LIVE_V1.total_experiment_loss_limit
+                ):
+                    ControlledLiveRepository(self._sessions).activate_kill_switch()
+                    raise ControlledLiveBlocked(
+                        "Total controlled-live experiment loss limit reached; kill switch activated"
+                    )
+                closed_results = _closed_order_results(execution_rows)
+                consecutive_losses = 0
+                for _, pnl, _closed_at in closed_results:
+                    if pnl >= 0:
+                        break
+                    consecutive_losses += 1
+                if consecutive_losses >= CONTROLLED_LIVE_V1.max_consecutive_losses:
+                    raise ControlledLiveBlocked(
+                        "Consecutive-loss stop is active until the next UTC day"
+                    )
         else:
             open_planned_risk = Decimal()
         return GuardSnapshot(ask, open_positions, equity, daily_pnl, open_planned_risk)
@@ -790,6 +822,17 @@ class BybitV5OrderGateway:
             None,
         )
 
+    async def verify_native_protection(
+        self, symbol: str, stop_loss: Decimal, take_profit: Decimal
+    ) -> bool:
+        """Confirm Bybit persisted both exact full-position protection levels."""
+        position = await self.read_position(symbol)
+        return bool(
+            position
+            and _decimal(position.get("stopLoss")) == stop_loss
+            and _decimal(position.get("takeProfit")) == take_profit
+        )
+
     async def set_leverage(
         self,
         symbol: str,
@@ -1071,11 +1114,13 @@ class BybitV5OrderGateway:
     def _validate_preview(
         self, preview: ManualExecutionPreview, client_order_id: str
     ) -> None:
+        ai_source = preview.source == AI_SIGNAL_SOURCE
+        notional_limit = AI_MAX_NOTIONAL if ai_source else MAX_NOTIONAL
         if (
             preview.symbol not in ALLOWED_SYMBOLS
             or preview.quantity <= 0
             or preview.leverage != CONTROLLED_LIVE_V1.leverage
-            or preview.expected_notional > MAX_NOTIONAL
+            or preview.expected_notional > notional_limit
             or preview.side not in {"BUY", "SELL"}
             or not preview.executable
             or preview.selection_hash
@@ -1088,7 +1133,7 @@ class BybitV5OrderGateway:
                 ),
             }
         ):
-            raise ControlledLiveBlocked("Preview violates CONTROLLED_LIVE_V1 production limits")
+            raise ControlledLiveBlocked("Preview violates production execution limits")
         if client_order_id != preview.client_order_id or len(client_order_id) > 36:
             raise ControlledLiveBlocked("Invalid deterministic Bybit client order ID")
         if isinstance(self._authorizer, ProductionMutationGuard):

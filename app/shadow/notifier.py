@@ -164,6 +164,21 @@ class ShadowNotifier:
             return False
         return True
 
+    async def ai_order_opened(self, preview, fill) -> bool:
+        return await self._send(
+            "✅ <b>REAL ORDER OPENED</b>\n\n"
+            f"Symbol: {escape(preview.symbol)}\n"
+            f"Direction: {'LONG' if preview.side == 'BUY' else 'SHORT'}\n"
+            f"AI confidence: {preview.signal_score}%\n"
+            f"Entry: {fill.average_price}\n"
+            f"Size: {fill.filled_quantity} (~${preview.expected_notional})\n"
+            f"Leverage: {preview.leverage}x\n"
+            f"SL: {preview.stop_loss}\n"
+            f"TP: {preview.take_profit}\n"
+            f"Order ID: {escape(fill.order_id)}\n\n"
+            "Exchange-native SL/TP verified; execution recorded in PostgreSQL."
+        )
+
     async def _send(self, text: str) -> bool:
         if not self.bot:
             return False

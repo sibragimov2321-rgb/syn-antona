@@ -10,6 +10,12 @@ import signal
 import uuid
 
 from app.core.config import get_settings
+from app.ai.live_trader import (
+    AIAutonomousTrader,
+    AILiveRepository,
+    AIMarketDataReader,
+)
+from app.ai.service import OpenAICompatibleProvider
 from app.db import (
     ControlledLiveRuntimeRecord,
     SessionLocal,
@@ -100,10 +106,11 @@ async def run(poll_seconds: int = 60) -> None:
     phase_repository = FirstLiveProposalRepository(SessionLocal)
     scanner_repository = MultiSymbolScannerRepository(SessionLocal)
     controlled_repository = ControlledLiveRepository(SessionLocal)
-    signal_engine = ControlledLiveSignalEngine(SessionLocal)
+    signal_engine = None
     notifier = ShadowNotifier(settings.telegram_bot_token, settings.admin_telegram_ids)
     gateway = None
     coordinator = None
+    ai_trader = None
     current_task = asyncio.current_task()
     loop = asyncio.get_running_loop()
     installed: list[signal.Signals] = []
@@ -122,12 +129,24 @@ async def run(poll_seconds: int = 60) -> None:
         if not os.getenv("BYBIT_API_KEY") or not os.getenv("BYBIT_API_SECRET"):
             raise RuntimeError("Bybit credentials are missing")
         gateway = BybitV5OrderGateway.from_environment(SessionLocal)
-        coordinator = MultiSymbolFirstProposalCoordinator(
-            scanner_repository,
-            phase_repository,
-            BybitMultiSymbolReadOnlyReader.from_environment(),
-            settings.admin_telegram_ids,
-        )
+        AILiveRepository(SessionLocal).initialize(settings)
+        if settings.ai_trading_enabled:
+            ai_trader = AIAutonomousTrader(
+                settings,
+                SessionLocal,
+                OpenAICompatibleProvider(settings),
+                AIMarketDataReader.from_environment(),
+                gateway,
+                notifier,
+            )
+        else:
+            signal_engine = ControlledLiveSignalEngine(SessionLocal)
+            coordinator = MultiSymbolFirstProposalCoordinator(
+                scanner_repository,
+                phase_repository,
+                BybitMultiSymbolReadOnlyReader.from_environment(),
+                settings.admin_telegram_ids,
+            )
         _heartbeat(instance_id, "RUNNING")
         log_event(
             logger,
@@ -139,6 +158,7 @@ async def run(poll_seconds: int = 60) -> None:
                 "shadow_auto_restart": "OFF",
                 "live_trading_enabled": settings.live_trading_enabled,
                 "controlled_live_enabled": settings.controlled_live_enabled,
+                "ai_trading_enabled": settings.ai_trading_enabled,
                 "dry_run": settings.dry_run,
                 "real_order_execution_enabled": bool(
                     not settings.dry_run
@@ -150,6 +170,19 @@ async def run(poll_seconds: int = 60) -> None:
         )
         while True:
             try:
+                if ai_trader is not None:
+                    result = await ai_trader.cycle()
+                    _heartbeat(instance_id, "RUNNING")
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "ai_live_cycle",
+                        result,
+                    )
+                    await asyncio.sleep(poll_seconds)
+                    continue
+                if signal_engine is None or coordinator is None:
+                    raise RuntimeError("Controlled Live decision engine is not initialized")
                 signals = await signal_engine.cycle()
                 proposal = await coordinator.cycle()
                 if (
@@ -206,9 +239,12 @@ async def run(poll_seconds: int = 60) -> None:
             loop.remove_signal_handler(item)
         if coordinator is not None:
             await coordinator.close()
+        if ai_trader is not None:
+            await ai_trader.close()
         if gateway is not None:
             await gateway.close()
-        await signal_engine.close()
+        if signal_engine is not None:
+            await signal_engine.close()
         await notifier.close()
 
 

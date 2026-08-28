@@ -27,6 +27,7 @@ from app.db import (
 from app.exchanges.models import InstrumentRules, OrderSide
 from app.trading.execution_store import OrderRejected
 from app.trading.controlled_universe import (
+    AI_SIGNAL_SOURCE,
     ALLOWED_SCANNER_SYMBOLS,
     FROZEN_SIGNAL_SOURCE,
     internal_symbol,
@@ -651,6 +652,91 @@ class ControlledLiveRepository:
             exchange_status="FILLED",
         )
 
+    def claim_ai_submission(self, preview: ManualExecutionPreview, account_id: str) -> None:
+        """Reserve an autonomous order without the legacy one-time validation lock."""
+        if preview.source != AI_SIGNAL_SOURCE:
+            raise ControlledLiveBlocked("AI submission requires the AI source identity")
+        now = datetime.now(UTC)
+        with self.session_factory() as session:
+            record = session.get(ControlledLiveProposalRecord, preview.proposal_id)
+            state = session.get(ControlledLiveStateRecord, self.profile.name)
+            if record is None or state is None:
+                raise ControlledLiveBlocked("Approved AI proposal/state is missing")
+            self._verify_hash(record.profile_hash)
+            self._verify_selection(preview.symbol, record.selection_hash)
+            if record.proposal_hash != preview.proposal_hash or record.status != "APPROVED":
+                raise ControlledLiveBlocked("Exact durable AI proposal is required")
+            if state.kill_switch_active:
+                raise ControlledLiveBlocked("Emergency kill switch is active")
+            existing = session.scalar(
+                select(ExecutionOrderRecord).where(
+                    ExecutionOrderRecord.exchange == "bybit",
+                    ExecutionOrderRecord.account_id == account_id,
+                    ExecutionOrderRecord.client_order_id == preview.client_order_id,
+                )
+            )
+            if existing is not None:
+                raise ControlledLiveBlocked("Duplicate deterministic AI client order ID")
+            record.status = "SUBMITTING"
+            record.submitted_at = now
+            record.updated_at = now
+            session.add(
+                ExecutionOrderRecord(
+                    exchange="bybit",
+                    account_id=account_id,
+                    client_order_id=preview.client_order_id,
+                    symbol=internal_symbol(preview.symbol),
+                    side=preview.side,
+                    quantity=preview.quantity,
+                    request_hash=preview.proposal_hash,
+                    status="PENDING",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+    def mark_ai_filled(self, preview: ManualExecutionPreview, fill: LiveFill) -> None:
+        self._update_ai_execution(
+            preview,
+            proposal_status="FILLED_UNPROTECTED",
+            ledger_status="SUBMITTED",
+            exchange_order_id=fill.order_id,
+            position_id=fill.position_id,
+            exchange_status="FILLED",
+        )
+
+    def mark_ai_protected(self, preview: ManualExecutionPreview) -> None:
+        self._update_ai_execution(
+            preview, proposal_status="PROTECTED", ledger_status="FILLED_PROTECTED"
+        )
+
+    def mark_ai_emergency_closed(
+        self, preview: ManualExecutionPreview, error: Exception
+    ) -> None:
+        self._update_ai_execution(
+            preview,
+            proposal_status="EMERGENCY_CLOSED",
+            ledger_status="EMERGENCY_CLOSED",
+            error_code=type(error).__name__,
+        )
+
+    def mark_ai_unknown(self, preview: ManualExecutionPreview, error: Exception) -> None:
+        self._update_ai_execution(
+            preview,
+            proposal_status="UNKNOWN",
+            ledger_status="UNKNOWN",
+            error_code=type(error).__name__,
+        )
+
+    def mark_ai_rejected(self, preview: ManualExecutionPreview, error: Exception) -> None:
+        self._update_ai_execution(
+            preview,
+            proposal_status="REJECTED",
+            ledger_status="REJECTED",
+            error_code=type(error).__name__,
+        )
+
     def mark_protected(self, preview: ManualExecutionPreview) -> None:
         self._update_execution(
             preview,
@@ -752,6 +838,41 @@ class ControlledLiveRepository:
                 state.first_order_in_progress = False
                 state.updated_at = now
             session.commit()
+
+    def _update_ai_execution(
+        self,
+        preview: ManualExecutionPreview,
+        *,
+        proposal_status: str,
+        ledger_status: str,
+        exchange_order_id: str | None = None,
+        position_id: str | None = None,
+        exchange_status: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self.session_factory.begin() as session:
+            record = session.get(ControlledLiveProposalRecord, preview.proposal_id)
+            ledger = session.scalar(
+                select(ExecutionOrderRecord).where(
+                    ExecutionOrderRecord.exchange == "bybit",
+                    ExecutionOrderRecord.client_order_id == preview.client_order_id,
+                )
+            )
+            if record is None or ledger is None or record.source != AI_SIGNAL_SOURCE:
+                raise RuntimeError("AI execution persistence is incomplete")
+            record.status = proposal_status
+            record.exchange_order_id = exchange_order_id or record.exchange_order_id
+            record.position_id = position_id or record.position_id
+            record.error_code = error_code
+            if proposal_status in {"PROTECTED", "EMERGENCY_CLOSED", "REJECTED"}:
+                record.completed_at = now
+            record.updated_at = now
+            ledger.status = ledger_status
+            ledger.exchange_order_id = exchange_order_id or ledger.exchange_order_id
+            ledger.exchange_status = exchange_status or ledger.exchange_status
+            ledger.error_code = error_code
+            ledger.updated_at = now
 
     def _verify_hash(self, value: str) -> None:
         if value != self.profile.config_hash:

@@ -1,5 +1,6 @@
 import asyncio
 from decimal import Decimal
+from html import escape
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import CommandStart
@@ -8,6 +9,11 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db import ExecutionOrderRecord, SessionLocal
+from app.ai.live_trader import (
+    AILiveRepository,
+    format_ai_live_status_ru,
+    format_ai_positions_ru,
+)
 from app.trading.controlled_live import ControlledLiveRepository
 from app.trading.first_live_proposal import (
     FROZEN_SIGNAL_SOURCE,
@@ -56,6 +62,9 @@ def dashboard() -> InlineKeyboardMarkup:
 
 
 def dashboard_text() -> str:
+    ai_status = AILiveRepository(SessionLocal).status()
+    if ai_status.enabled:
+        return format_ai_live_status_ru(ai_status) + "\n\nSHADOW: OFF | DEMO: OFF"
     status = scanner_status(SessionLocal)
     return (
         "🤖 <b>СЫН АНТОНА</b>\n\n"
@@ -185,6 +194,13 @@ async def actions(callback: CallbackQuery) -> None:
             "Существующие позиции сохраняют exchange-native SL/TP."
         )
     elif callback.data == "positions":
+        ai_status = AILiveRepository(SessionLocal).status()
+        if ai_status.enabled:
+            await callback.message.answer(
+                format_ai_positions_ru(ai_status), parse_mode="HTML"
+            )
+            await callback.answer()
+            return
         status = scanner_status(SessionLocal)
         text = (
             "📈 <b>РЕАЛЬНЫЕ BYBIT ПОЗИЦИИ</b>\n\n"
@@ -234,17 +250,39 @@ async def actions(callback: CallbackQuery) -> None:
             parse_mode="HTML",
         )
     elif callback.data == "analysis":
-        await callback.message.answer("📊 <b>АНАЛИЗ</b>\n\nИспользуются только технические правила. AI API отключён.", parse_mode="HTML")
+        ai_status = AILiveRepository(SessionLocal).status()
+        if ai_status.enabled:
+            await callback.message.answer(
+                format_ai_live_status_ru(ai_status), parse_mode="HTML"
+            )
+        else:
+            await callback.message.answer(
+                "📊 <b>АНАЛИЗ</b>\n\nAI live пока выключен; действует текущий Controlled Live.",
+                parse_mode="HTML",
+            )
     elif callback.data == "controlled:status":
-        # Read-only refresh: no market fetch into the strategy and no decision run.
-        await callback.message.answer(
-            format_scanner_status_ru(scanner_status(SessionLocal)),
-            parse_mode="HTML",
-            reply_markup=signal_wait_keyboard(),
+        ai_status = AILiveRepository(SessionLocal).status()
+        text = (
+            format_ai_live_status_ru(ai_status)
+            if ai_status.enabled
+            else format_scanner_status_ru(scanner_status(SessionLocal))
         )
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=signal_wait_keyboard())
     elif callback.data == "controlled:why":
+        ai_status = AILiveRepository(SessionLocal).status()
+        if ai_status.enabled:
+            reasons = [
+                f"{item['symbol']} — {item['action']} {item['confidence']}%: "
+                f"{escape(str(item['reason']))}"
+                for item in ai_status.decisions
+            ]
+            text = "🤖 <b>ПОСЛЕДНИЕ РЕШЕНИЯ AI</b>\n\n" + (
+                "\n".join(reasons) if reasons else "Решений пока нет."
+            )
+        else:
+            text = format_scanner_wait_reasons_ru(scanner_status(SessionLocal))
         await callback.message.answer(
-            format_scanner_wait_reasons_ru(scanner_status(SessionLocal)),
+            text,
             parse_mode="HTML",
             reply_markup=signal_wait_keyboard(),
         )

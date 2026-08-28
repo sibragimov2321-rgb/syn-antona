@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import httpx
+from pydantic import BaseModel
 
 from app.ai.models import AIResult, MarketContext, RiskLevel, RoleResult, Trend
 from app.core.config import Settings
@@ -31,16 +32,49 @@ class OpenAICompatibleProvider(AIProvider):
     """OpenAI/OpenRouter compatible HTTP client. Output is always parsed as untrusted JSON."""
     def __init__(self, settings: Settings): self.settings = settings
     async def complete(self, prompt: str, schema: type[AIResult]) -> dict:
+        return await self.complete_json(prompt, schema)
+
+    async def complete_json(self, prompt: str, schema: type[BaseModel]) -> dict:
         if not self.settings.ai_api_key: raise AIUnavailable("AI API key is not configured")
-        base = "https://api.openai.com/v1" if self.settings.ai_provider == "openai" else "https://openrouter.ai/api/v1"
+        base = (self.settings.ai_base_url or (
+            "https://api.openai.com/v1"
+            if self.settings.ai_provider == "openai"
+            else "https://openrouter.ai/api/v1"
+        )).rstrip("/")
+        if not base.startswith("https://"):
+            raise AIUnavailable("AI_BASE_URL must use HTTPS")
         headers = {"Authorization": f"Bearer {self.settings.ai_api_key}"}
-        body = {"model": self.settings.ai_model, "messages": [{"role":"system","content":"Return JSON only."},{"role":"user","content":prompt}], "response_format":{"type":"json_object"}}
+        body = {
+            "model": self.settings.ai_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a market-analysis decision engine. Compare all supplied "
+                        "symbols. Return only data matching the JSON schema. Use WAIT when "
+                        "there is no defensible setup, but evaluate LONG and SHORT normally."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema.__name__.lower(),
+                    "strict": True,
+                    "schema": schema.model_json_schema(),
+                },
+            },
+        }
         try:
             async with httpx.AsyncClient(timeout=self.settings.ai_timeout) as client:
                 response = await client.post(f"{base}/chat/completions", headers=headers, json=body)
             if response.status_code == 429: raise AIRateLimited("AI rate limited")
             response.raise_for_status()
-            return json.loads(response.json()["choices"][0]["message"]["content"])
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise ValueError("AI response content is not a JSON string")
+            return json.loads(content)
         except (httpx.HTTPError, KeyError, ValueError) as error:
             raise AIUnavailable("AI provider unavailable or returned invalid data") from error
 
