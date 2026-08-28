@@ -166,3 +166,14 @@ def test_self_check_formatter_is_explicitly_read_only():
     assert "Margin gate: ISOLATED" in text
     assert "Leverage: 10x" in text
     assert "ордера не создаются" in text
+
+
+def test_self_check_formatter_shows_sanitized_ai_failure_reason():
+    sessions = _healthy()
+    with sessions.begin() as session:
+        ai = session.get(AILiveRuntimeRecord, "AI_LIVE")
+        ai.status = "DEGRADED"
+        ai.last_error = "AI HTTP 402: insufficient AI provider credits"
+    text = format_self_check_ru(trading_self_check(sessions, NOW))
+    assert "Итог: <b>WARNING</b>" in text
+    assert "Причина AI: AI HTTP 402: insufficient AI provider credits" in text

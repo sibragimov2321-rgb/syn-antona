@@ -80,6 +80,16 @@ class OpenAICompatibleProvider(AIProvider):
             if not isinstance(content, str):
                 raise ValueError("AI response content is not a JSON string")
             return json.loads(content)
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            reason = {
+                400: "invalid provider request",
+                401: "authentication failed",
+                402: "insufficient AI provider credits",
+                403: "provider access forbidden",
+                404: "model or endpoint not found",
+            }.get(status, "provider request failed")
+            raise AIUnavailable(f"AI HTTP {status}: {reason}") from error
         except (httpx.HTTPError, KeyError, ValueError) as error:
             raise AIUnavailable("AI provider unavailable or returned invalid data") from error
 

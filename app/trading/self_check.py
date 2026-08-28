@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from html import escape
 
 from sqlalchemy import func, select, text
 
@@ -29,6 +30,7 @@ class TradingSelfCheck:
     execution_enabled: bool
     ai_ok: bool
     ai_status: str
+    ai_error: str | None
     market_data_age: timedelta | None
     kill_switch_safe: bool
     shadow_collectors: int
@@ -71,7 +73,7 @@ def trading_self_check(session_factory, now: datetime | None = None) -> TradingS
             ) or 0
     except Exception:
         return TradingSelfCheck(
-            False, False, "UNAVAILABLE", None, False, False, "UNAVAILABLE", None,
+            False, False, "UNAVAILABLE", None, False, False, "UNAVAILABLE", None, None,
             False, 0, 0, 0, 0, False,
         )
 
@@ -105,6 +107,7 @@ def trading_self_check(session_factory, now: datetime | None = None) -> TradingS
         execution_enabled=bool(worker and worker.real_order_execution_enabled),
         ai_ok=ai_ok,
         ai_status=ai.status if ai else "MISSING",
+        ai_error=ai.last_error if ai else None,
         market_data_age=market_age,
         kill_switch_safe=bool(state and not state.kill_switch_active),
         shadow_collectors=shadow_count,
@@ -116,8 +119,7 @@ def trading_self_check(session_factory, now: datetime | None = None) -> TradingS
 
 
 def format_self_check_ru(value: TradingSelfCheck) -> str:
-    return "\n".join(
-        (
+    lines = [
             "🧪 <b>САМОПРОВЕРКА СИСТЕМЫ</b>",
             "",
             f"Итог: <b>{'PASS' if value.passed else 'WARNING'}</b>",
@@ -139,10 +141,11 @@ def format_self_check_ru(value: TradingSelfCheck) -> str:
             f"{_mark(value.unknown_orders == 0)} UNKNOWN orders: {value.unknown_orders}",
             f"Позиции: {value.open_positions} / {AI_MAX_POSITIONS}",
             f"Open orders: {value.open_orders}",
-            "",
-            "Проверка только читает PostgreSQL; ордера не создаются.",
-        )
-    )
+    ]
+    if value.ai_error:
+        lines.append(f"Причина AI: {escape(value.ai_error)}")
+    lines.extend(("", "Проверка только читает PostgreSQL; ордера не создаются."))
+    return "\n".join(lines)
 
 
 def _seconds(value: timedelta | None) -> str:

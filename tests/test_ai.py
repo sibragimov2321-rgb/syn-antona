@@ -72,3 +72,34 @@ async def test_openrouter_request_has_bounded_output_tokens(monkeypatch):
     )
     await OpenAICompatibleProvider(settings).complete_json("prompt", AIResult)
     assert captured["max_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_provider_402_is_reported_without_leaking_response_metadata(monkeypatch):
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            return httpx.Response(
+                402,
+                request=httpx.Request("POST", url),
+                json={"error": {"message": "credits", "user_id": "private-user"}},
+            )
+
+    monkeypatch.setattr("app.ai.service.httpx.AsyncClient", FakeClient)
+    settings = Settings(
+        ai_api_key="secret",
+        ai_provider="openrouter",
+        ai_base_url="https://openrouter.ai/api/v1",
+        ai_model="openai/gpt-5.4",
+    )
+    with pytest.raises(AIUnavailable, match="AI HTTP 402: insufficient") as error:
+        await OpenAICompatibleProvider(settings).complete_json("prompt", AIResult)
+    assert "private-user" not in str(error.value)
