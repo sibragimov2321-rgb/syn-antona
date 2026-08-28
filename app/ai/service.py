@@ -46,6 +46,11 @@ class OpenAICompatibleProvider(AIProvider):
         headers = {"Authorization": f"Bearer {self.settings.ai_api_key}"}
         body = {
             "model": self.settings.ai_model,
+            # OpenRouter otherwise reserves the model's full output window
+            # (65k tokens for GPT-5.4) and can reject a small structured
+            # request for insufficient credit. Eight compact decisions fit
+            # comfortably inside this explicit fail-bounded allowance.
+            "max_tokens": 4096,
             "messages": [
                 {
                     "role": "system",

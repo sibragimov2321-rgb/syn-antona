@@ -1,8 +1,17 @@
-import pytest
+import json as json_module
 from decimal import Decimal
 
+import httpx
+import pytest
+
 from app.ai.models import AIResult, RiskLevel, RoleResult, Trend
-from app.ai.service import AIAnalyst, AIConsensusEngine, AIUnavailable, MockAIProvider
+from app.ai.service import (
+    AIAnalyst,
+    AIConsensusEngine,
+    AIUnavailable,
+    MockAIProvider,
+    OpenAICompatibleProvider,
+)
 from app.core.config import Settings
 from app.domain.models import Decision, Signal
 from app.signals.engine import MarketFrame
@@ -30,3 +39,36 @@ def test_consensus_rejects_extreme_and_disagreement():
     engine=AIConsensusEngine(); extreme=RoleResult(direction=Trend.NEUTRAL,score=0,risk=RiskLevel.EXTREME)
     assert engine.aggregate(tech,RoleResult(direction=Trend.BULLISH,score=80),RoleResult(direction=Trend.BULLISH,score=80),extreme,result).decision is Decision.WAIT
     assert engine.aggregate(tech,RoleResult(direction=Trend.BEARISH,score=80),RoleResult(direction=Trend.BEARISH,score=80),RoleResult(direction=Trend.NEUTRAL,score=80,risk=RiskLevel.LOW),result).decision is Decision.WAIT
+
+
+@pytest.mark.asyncio
+async def test_openrouter_request_has_bounded_output_tokens(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured.update(json)
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={"choices": [{"message": {"content": json_module.dumps(valid())}}]},
+            )
+
+    monkeypatch.setattr("app.ai.service.httpx.AsyncClient", FakeClient)
+    settings = Settings(
+        ai_api_key="secret",
+        ai_provider="openrouter",
+        ai_base_url="https://openrouter.ai/api/v1",
+        ai_model="openai/gpt-5.4",
+    )
+    await OpenAICompatibleProvider(settings).complete_json("prompt", AIResult)
+    assert captured["max_tokens"] == 4096
