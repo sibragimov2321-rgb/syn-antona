@@ -36,12 +36,12 @@ from app.trading.controlled_universe import (
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1.json"
-CONTROLLED_LIVE_V1_HASH = "b382d2251bed6558bb14cc17e5ee411f76428c111e0fa5c26868b75cc739136f"
+CONTROLLED_LIVE_V1_HASH = "e92b8414d9a1d7fb5d6aa0406d59a6fb0e0408f602635d4a5ec4be99eb231c31"
 FIRST_INSTRUMENT_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "controlled_live_v1_first_symbol.json"
 )
 CONTROLLED_LIVE_V1_FIRST_INSTRUMENT_HASH = (
-    "8a453a1c1dd9b274d14b7dec2dc0e61adf3e79d56cf860194cc2e01fbcbb2938"
+    "04345c31c8775369efa3d5ea5e2f41a3bb19ff50802af676210046a8f1acda40"
 )
 MANUAL_SOURCE = "MANUAL_EXECUTION_VALIDATION"
 BYBIT_TAKER_FEE_RATE = Decimal("0.00055")

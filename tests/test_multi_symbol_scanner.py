@@ -657,7 +657,7 @@ def test_status_lists_exact_allowlist_and_uses_persisted_decisions_only():
     assert "REAL ORDER EXECUTION: <b>DISABLED</b>" in text
     assert "Threshold: 70" in text
     assert "Риск: 5% equity" in text
-    assert "Плечо: 2x" in text
+    assert "Плечо: 10x" in text
     assert "Минимальный R/R: 1:1.5" in text
     assert "MULTI-SYMBOL SIGNAL SCANNER" in text
     for symbol in SCANNER_CONFIG.symbols:
@@ -707,7 +707,7 @@ async def test_multi_symbol_gateway_dry_run_builds_payload_but_sends_no_post():
             Decimal("0.1"),
             Decimal("0.1"),
             Decimal("5"),
-            maximum_leverage=Decimal("2"),
+            maximum_leverage=Decimal("10"),
         ),
         instrument=selection,
     )

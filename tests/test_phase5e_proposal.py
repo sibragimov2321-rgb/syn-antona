@@ -183,7 +183,7 @@ async def test_natural_frozen_signal_creates_exact_immutable_preview(
     assert result.preview.quantity == Decimal("0.1")
     assert result.preview.expected_notional == entry * Decimal("0.1")
     assert result.preview.expected_notional <= 10
-    assert result.preview.leverage == 2
+    assert result.preview.leverage == 10
     assert result.preview.maximum_planned_loss <= Decimal("2.50")
     assert result.preview.risk_reward_ratio >= Decimal("1.5")
     state = repository.state()

@@ -79,7 +79,7 @@ def dashboard_text() -> str:
         f"{_money(status.remaining_daily_loss)} / $5\n"
         "Total experiment loss remaining: "
         f"{_money(status.remaining_experiment_loss)} / $10\n\n"
-        "Threshold: 70\nRisk max: 5%\nLeverage: 2x\nMin R/R: 1:1.5\n"
+        "Threshold: 70\nRisk max: 5%\nMargin: ISOLATED\nLeverage: 10x\nMin R/R: 1:1.5\n"
         "SHADOW: OFF | DEMO: OFF"
     )
 
@@ -244,7 +244,7 @@ async def actions(callback: CallbackQuery) -> None:
             "Порог сигнала: 70\nРиск на сделку: максимум 5% equity\n"
             "Абсолютный дневной risk budget: $5\n"
             "Лимит эксперимента: $10\nМаксимум позиций: 3\n"
-            "Количество сделок/день: без лимита\nПлечо: 2x\n"
+            "Количество сделок/день: без лимита\nМаржа: ISOLATED\nПлечо: 10x\n"
             "Минимум риск/прибыль: 1:1,5\nTrailing: OFF\n"
             "После двух последовательных убытков: STOP до следующего UTC дня.",
             parse_mode="HTML",

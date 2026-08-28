@@ -280,6 +280,13 @@ class ProductionMutationGuard:
         if permissions["withdraw"] != "NO" or permissions["transfer"] != "NO":
             raise ControlledLiveBlocked("Withdraw and Transfer permissions must be disabled")
 
+        if not risk_reducing:
+            account = await self._http.private_get("/v5/account/info", {})
+            if str(account.get("marginMode") or "") != "ISOLATED_MARGIN":
+                raise ControlledLiveBlocked(
+                    "Bybit account margin mode must be ISOLATED_MARGIN"
+                )
+
         instrument, ticker = await self._instrument_and_ticker(symbol)
         ask = _decimal(ticker.get("ask1Price") or ticker.get("lastPrice"))
         bid = _decimal(ticker.get("bid1Price") or ticker.get("lastPrice"))

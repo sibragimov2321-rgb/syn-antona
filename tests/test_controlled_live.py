@@ -131,7 +131,7 @@ def test_controlled_live_v1_is_frozen_and_exact() -> None:
     assert CONTROLLED_LIVE_V1.config_hash == CONTROLLED_LIVE_V1_HASH
     assert CONTROLLED_LIVE_V1.symbol == "BTC/USDT"
     assert CONTROLLED_LIVE_V1.signal_threshold == 70
-    assert CONTROLLED_LIVE_V1.leverage == 2
+    assert CONTROLLED_LIVE_V1.leverage == 10
     assert CONTROLLED_LIVE_V1.max_positions == 3
     assert CONTROLLED_LIVE_V1.max_trades_per_day is None
     assert CONTROLLED_LIVE_V1.risk_per_trade_pct == Decimal("0.05")
@@ -221,7 +221,7 @@ def test_dynamic_sizing_uses_five_percent_risk_including_costs_at_two_x() -> Non
         instrument=instrument,
     )
     assert preview.executable
-    assert preview.leverage == Decimal("2")
+    assert preview.leverage == Decimal("10")
     assert Decimal("2.49") <= preview.maximum_planned_loss <= Decimal("2.50")
     assert preview.maximum_planned_loss == (
         preview.quantity * Decimal("5")

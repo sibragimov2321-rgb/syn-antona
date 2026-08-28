@@ -189,6 +189,8 @@ class MockBybitVenue:
                     },
                 }
             )
+        if path == "/v5/account/info":
+            return _ok({"marginMode": "ISOLATED_MARGIN"})
         if path == "/v5/account/wallet-balance":
             return _ok(
                 {
@@ -596,12 +598,14 @@ class GuardHttp:
         turnover="100000000",
         executions=None,
         equity="50",
+        margin_mode="ISOLATED_MARGIN",
     ):
         self.positions = positions or []
         self.bid = bid
         self.turnover = turnover
         self.executions = executions or []
         self.equity = equity
+        self.margin_mode = margin_mode
 
     async def public_get(self, path, params):
         if path.endswith("instruments-info"):
@@ -634,6 +638,8 @@ class GuardHttp:
                     "Wallet": [],
                 },
             }
+        if path == "/v5/account/info":
+            return {"marginMode": self.margin_mode}
         if path == "/v5/position/list":
             return {"list": self.positions}
         if path == "/v5/order/realtime":
@@ -652,6 +658,22 @@ def _armed_environment(monkeypatch):
     monkeypatch.setenv("CONTROLLED_LIVE_V1_FIRST_SYMBOL", "SOLUSDT")
     monkeypatch.setenv("DRY_RUN", "false")
     monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "[42]")
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_production_guard_requires_isolated_margin_before_http(monkeypatch):
+    _, sessions, _, preview = _preview()
+    _armed_environment(monkeypatch)
+    with pytest.raises(ControlledLiveBlocked, match="ISOLATED_MARGIN"):
+        await ProductionMutationGuard(
+            sessions, GuardHttp(margin_mode="REGULAR_MARGIN")
+        ).authorize(
+            action="CREATE",
+            symbol="SOLUSDT",
+            quantity=Decimal("0.1"),
+            client_order_id=preview.client_order_id,
+        )
     get_settings.cache_clear()
 
 

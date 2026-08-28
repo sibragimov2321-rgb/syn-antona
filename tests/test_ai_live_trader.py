@@ -87,7 +87,7 @@ def test_ai_decision_schema_and_fixed_notional_preview() -> None:
     preview = build_ai_preview("scan-1", decision, _instrument())
     assert AI_CONFIDENCE_THRESHOLD == 70
     assert preview.side == OrderSide.BUY.value
-    assert preview.leverage == AI_LEVERAGE == Decimal("2")
+    assert preview.leverage == AI_LEVERAGE == Decimal("10")
     assert preview.expected_notional == AI_POSITION_NOTIONAL == Decimal("15")
     assert preview.quantity == Decimal("15")
     assert preview.stop_loss < Decimal("1") < preview.take_profit
@@ -322,6 +322,8 @@ class _GuardHttp:
                 "readOnly": 0,
                 "permissions": {"ContractTrade": ["Order", "Position"], "Wallet": []},
             }
+        if path == "/v5/account/info":
+            return {"marginMode": "ISOLATED_MARGIN"}
         if path == "/v5/position/list":
             return {"list": []}
         if path == "/v5/order/realtime":

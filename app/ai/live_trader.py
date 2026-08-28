@@ -51,7 +51,7 @@ from app.trading.multi_symbol_scanner import (
 
 AI_RUNTIME_NAME = "AI_LIVE"
 AI_POSITION_NOTIONAL = Decimal("15")
-AI_LEVERAGE = Decimal("2")
+AI_LEVERAGE = Decimal("10")
 AI_MAX_POSITIONS = 3
 AI_CONFIDENCE_THRESHOLD = 70
 TIMEFRAMES = {"5m": ("5", 5), "15m": ("15", 15), "1h": ("60", 60)}
@@ -679,6 +679,7 @@ def format_ai_live_status_ru(status: AILiveStatus) -> str:
         f"Available: {_money(status.available_balance)}",
         f"📊 Open positions: {status.open_positions} / {AI_MAX_POSITIONS}",
         f"Open orders: {status.open_orders}",
+        "🧱 Margin: ISOLATED",
         f"⚡ Leverage: {AI_LEVERAGE}x",
         f"💰 Position size: ~${AI_POSITION_NOTIONAL}",
         "Scan interval: 5m",
