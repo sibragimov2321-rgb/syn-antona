@@ -28,6 +28,7 @@ from app.db import (
     ControlledLiveStateRecord,
     ExecutionOrderRecord,
 )
+from app.exchanges.bybit_balance import derivatives_available_balance
 from app.exchanges.bybit_readonly import permission_summary
 from app.trading.controlled_live import (
     ArmingGates,
@@ -365,9 +366,7 @@ class ProductionMutationGuard:
         accounts = wallet.get("list") or []
         equity = _decimal(accounts[0].get("totalEquity")) if accounts else Decimal()
         available_balance = (
-            _decimal(accounts[0].get("totalAvailableBalance"))
-            if accounts
-            else Decimal()
+            derivatives_available_balance(accounts[0]) if accounts else Decimal()
         )
         execution_rows = await self._daily_executions()
         daily_pnl = sum(
@@ -653,7 +652,7 @@ class BybitV5OrderGateway:
             minimum_notional=_decimal(lot.get("minNotionalValue")),
             wallet_balance=_decimal(usdt.get("walletBalance")),
             equity=_decimal(account.get("totalEquity")),
-            available_balance=_decimal(account.get("totalAvailableBalance")),
+            available_balance=derivatives_available_balance(account),
             open_positions=sum(
                 _decimal(item.get("size")) > 0 for item in positions.get("list") or []
             ),

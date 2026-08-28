@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base, ControlledLiveStateRecord, ExecutionOrderRecord
+from app.exchanges.bybit_balance import derivatives_available_balance
 from app.exchanges.bybit_v5_gateway import (
     BybitOrderRejected,
     BybitV5Http,
@@ -224,6 +225,23 @@ class MockBybitVenue:
 
 def _ok(result):
     return httpx.Response(200, json={"retCode": 0, "retMsg": "OK", "result": result})
+
+
+def test_isolated_available_balance_uses_documented_coin_formula():
+    account = {
+        "totalAvailableBalance": "",
+        "coin": [
+            {
+                "coin": "USDT",
+                "walletBalance": "50",
+                "totalPositionIM": "3",
+                "totalOrderIM": "2",
+                "locked": "1",
+                "bonus": "0.5",
+            }
+        ],
+    }
+    assert derivatives_available_balance(account) == Decimal("43.5")
 
 
 def _error(code, message):

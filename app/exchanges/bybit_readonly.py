@@ -26,6 +26,7 @@ from sqlalchemy import create_engine, inspect, text
 from app.exchanges.adapters import BybitAdapter
 from app.exchanges.base import LiveTradingDisabledError
 from app.exchanges.models import MarketType, OrderRequest, OrderSide, OrderType
+from app.exchanges.bybit_balance import derivatives_available_balance
 
 
 MAINNET_BASE_URL = "https://api.bytick.com"
@@ -258,7 +259,7 @@ def _safe_wallet(result: dict[str, Any]) -> dict[str, str]:
     )
     return {
         "total_equity": str(account.get("totalEquity") or "0"),
-        "available_balance": str(account.get("totalAvailableBalance") or "0"),
+        "available_balance": str(derivatives_available_balance(account)),
         "wallet_balance": str(account.get("totalWalletBalance") or "0"),
         "unrealized_pnl": str(account.get("totalPerpUPL") or "0"),
         "usdt_wallet_balance": str(usdt.get("walletBalance") or "0"),

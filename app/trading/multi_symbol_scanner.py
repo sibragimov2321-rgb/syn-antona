@@ -29,6 +29,7 @@ from app.db import (
     ShadowTradeRecord,
     SignalWaitRuntimeRecord,
 )
+from app.exchanges.bybit_balance import derivatives_available_balance
 from app.exchanges.bybit_readonly import BybitMainnetReadOnlyClient
 from app.exchanges.bybit_v5_gateway import _open_positions_planned_risk
 from app.exchanges.models import InstrumentRules, OrderSide
@@ -264,7 +265,7 @@ class BybitMultiSymbolReadOnlyReader:
             instruments,
             ScannerAccount(
                 equity=_decimal(account.get("totalEquity")),
-                available_balance=_decimal(account.get("totalAvailableBalance")),
+                available_balance=derivatives_available_balance(account),
                 open_positions=len(position_rows),
                 open_order_ids=frozenset(
                     str(item.get("orderId"))
