@@ -24,6 +24,7 @@ from app.trading.multi_symbol_scanner import (
     format_scanner_wait_reasons_ru,
     scanner_status,
 )
+from app.trading.self_check import format_self_check_ru, trading_self_check
 
 router = Router()
 
@@ -56,7 +57,12 @@ def dashboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🛡 Управление риском", callback_data="risk"),
                 InlineKeyboardButton(text="💼 История сделок", callback_data="history"),
             ],
-            [InlineKeyboardButton(text="📉 Статистика", callback_data="statistics")],
+            [
+                InlineKeyboardButton(text="📉 Статистика", callback_data="statistics"),
+                InlineKeyboardButton(
+                    text="🧪 Самопроверка", callback_data="system:selfcheck"
+                ),
+            ],
         ]
     )
 
@@ -134,6 +140,7 @@ async def actions(callback: CallbackQuery) -> None:
         "risk",
         "history",
         "statistics",
+        "system:selfcheck",
     }
     admin_only = callback.data in admin_actions or bool(
         callback.data and callback.data.startswith("phase5e:")
@@ -247,6 +254,11 @@ async def actions(callback: CallbackQuery) -> None:
             "Количество сделок/день: без лимита\nМаржа: ISOLATED\nПлечо: 10x\n"
             "Минимум риск/прибыль: 1:1,5\nTrailing: OFF\n"
             "После двух последовательных убытков: STOP до следующего UTC дня.",
+            parse_mode="HTML",
+        )
+    elif callback.data == "system:selfcheck":
+        await callback.message.answer(
+            format_self_check_ru(trading_self_check(SessionLocal)),
             parse_mode="HTML",
         )
     elif callback.data == "analysis":

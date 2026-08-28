@@ -336,5 +336,6 @@ def test_production_dashboard_contains_only_controlled_live_actions():
     ]
     callbacks = {button.text: button.callback_data for button in buttons}
     assert callbacks["🟢 CONTROLLED LIVE"] == "controlled:status"
+    assert callbacks["🧪 Самопроверка"] == "system:selfcheck"
     assert "▶️ Запустить DEMO" not in callbacks
     assert "📊 SHADOW REPORT" not in callbacks
