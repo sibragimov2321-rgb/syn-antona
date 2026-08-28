@@ -117,6 +117,8 @@ def test_ai_batch_rejects_duplicate_or_unknown_symbols() -> None:
     values = {
         "action": "WAIT",
         "confidence": 20,
+        "stop_loss": None,
+        "take_profit": None,
         "reason": "no setup",
     }
     with pytest.raises(ValueError):
@@ -127,6 +129,27 @@ def test_ai_batch_rejects_duplicate_or_unknown_symbols() -> None:
         AIBatchDecision.model_validate(
             {"decisions": [{"symbol": "BTCUSDT", **values}]}
         )
+
+
+def test_ai_batch_strict_schema_requires_nullable_trade_levels() -> None:
+    decision_schema = AIBatchDecision.model_json_schema()["$defs"]["AIDecision"]
+    assert set(decision_schema["required"]) == set(decision_schema["properties"])
+
+    wait = AIBatchDecision.model_validate(
+        {
+            "decisions": [
+                {
+                    "symbol": "SOLUSDT",
+                    "action": "WAIT",
+                    "confidence": 0,
+                    "stop_loss": None,
+                    "take_profit": None,
+                    "reason": "No setup",
+                }
+            ]
+        }
+    )
+    assert wait.decisions[0].stop_loss is None
 
 
 def test_ai_scan_is_idempotent_and_decisions_persist() -> None:

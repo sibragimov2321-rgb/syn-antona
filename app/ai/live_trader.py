@@ -65,8 +65,11 @@ class AIDecision(BaseModel):
     symbol: str
     action: Literal["LONG", "SHORT", "WAIT"]
     confidence: int = Field(ge=0, le=100)
-    stop_loss: float | None = None
-    take_profit: float | None = None
+    # Strict OpenAI-compatible JSON Schema requires every declared property to
+    # be listed as required. WAIT decisions carry explicit nulls; trade
+    # decisions still require numeric levels in the validator below.
+    stop_loss: float | None
+    take_profit: float | None
     reason: str = Field(min_length=1, max_length=500)
 
     @model_validator(mode="after")
