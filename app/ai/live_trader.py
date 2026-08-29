@@ -24,17 +24,22 @@ from app.db import (
     AILiveDecisionRecord,
     AILiveRuntimeRecord,
     AILiveScanRecord,
+    BybitFeeRateCacheRecord,
     ControlledLiveProposalRecord,
 )
 from app.exchanges.models import OrderSide
 from app.trading.execution_store import OrderRejected
 from app.market.indicators import ema, snapshot as indicator_snapshot
 from app.trading.controlled_live import (
-    BYBIT_TAKER_FEE_RATE,
     CONTROLLED_LIVE_V1,
     ControlledLiveBlocked,
     ControlledLiveRepository,
     ManualExecutionPreview,
+)
+from app.trading.live_costs import (
+    estimate_live_costs,
+    require_cost_aware_edge,
+    validate_taker_fee_rate,
 )
 from app.trading.controlled_universe import (
     AI_SIGNAL_SOURCE,
@@ -53,7 +58,9 @@ AI_RUNTIME_NAME = "AI_LIVE"
 AI_POSITION_NOTIONAL = Decimal("15")
 AI_LEVERAGE = Decimal("10")
 AI_MAX_POSITIONS = 3
-AI_CONFIDENCE_THRESHOLD = 70
+AI_CONFIDENCE_THRESHOLD = 75
+SAME_SYMBOL_COOLDOWN = timedelta(minutes=60)
+FEE_CACHE_MAX_AGE = timedelta(hours=24)
 TIMEFRAMES = {"5m": ("5", 5), "15m": ("15", 15), "1h": ("60", 60)}
 MAX_LEVEL_DISTANCE_PCT = Decimal("0.10")
 MIN_LEVEL_DISTANCE_PCT = Decimal("0.001")
@@ -114,6 +121,22 @@ class AIMarketSnapshot:
     candles: dict[str, dict[str, tuple[ClosedCandle, ...]]]
     positions: tuple[dict[str, Any], ...]
     fetched_at: datetime
+
+
+@dataclass(frozen=True)
+class BybitFeeRateSnapshot:
+    symbol: str
+    maker_fee_rate: Decimal
+    taker_fee_rate: Decimal
+    verified_at: datetime
+
+
+@dataclass(frozen=True)
+class RecentClosedPosition:
+    symbol: str
+    direction: Literal["LONG", "SHORT"]
+    closed_at: datetime
+    exit_reason: Literal["SL", "TP", "OTHER"]
 
 
 @dataclass(frozen=True)
@@ -215,6 +238,62 @@ class AIMarketDataReader:
     async def close(self) -> None:
         await self.reader.close()
 
+    async def fee_rates(self, now: datetime | None = None) -> dict[str, BybitFeeRateSnapshot]:
+        verified = (now or datetime.now(UTC)).astimezone(UTC)
+        response = await self.reader.client.private_get(
+            "/v5/account/fee-rate", {"category": "linear"}
+        )
+        rates: dict[str, BybitFeeRateSnapshot] = {}
+        for item in response.result.get("list") or []:
+            symbol = str(item.get("symbol") or "")
+            if symbol not in ALLOWED_SCANNER_SYMBOLS:
+                continue
+            taker = validate_taker_fee_rate(Decimal(str(item.get("takerFeeRate") or "0")))
+            maker = Decimal(str(item.get("makerFeeRate") or "0"))
+            rates[symbol] = BybitFeeRateSnapshot(symbol, maker, taker, verified)
+        missing = ALLOWED_SCANNER_SYMBOLS - set(rates)
+        if missing:
+            raise RuntimeError("Bybit fee API omitted allowed symbols")
+        return rates
+
+    async def recent_closes(self) -> tuple[RecentClosedPosition, ...]:
+        closed_response, executions_response = await asyncio.gather(
+            self.reader.client.private_get(
+                "/v5/position/closed-pnl", {"category": "linear", "limit": 100}
+            ),
+            self.reader.client.private_get(
+                "/v5/execution/list", {"category": "linear", "limit": 100}
+            ),
+        )
+        execution_by_order = {
+            str(item.get("orderId") or ""): item
+            for item in executions_response.result.get("list") or []
+        }
+        rows: list[RecentClosedPosition] = []
+        for item in closed_response.result.get("list") or []:
+            symbol = str(item.get("symbol") or "")
+            if symbol not in ALLOWED_SCANNER_SYMBOLS:
+                continue
+            execution = execution_by_order.get(str(item.get("orderId") or ""), {})
+            marker = (
+                str(execution.get("stopOrderType") or "")
+                + str(execution.get("createType") or "")
+            ).upper()
+            reason: Literal["SL", "TP", "OTHER"] = "OTHER"
+            if "STOPLOSS" in marker:
+                reason = "SL"
+            elif "TAKEPROFIT" in marker:
+                reason = "TP"
+            rows.append(
+                RecentClosedPosition(
+                    symbol,
+                    "LONG" if str(item.get("side")) == "Sell" else "SHORT",
+                    datetime.fromtimestamp(int(item["updatedTime"]) / 1000, tz=UTC),
+                    reason,
+                )
+            )
+        return tuple(sorted(rows, key=lambda item: item.closed_at))
+
 
 class AILiveRepository:
     def __init__(self, session_factory) -> None:
@@ -233,6 +312,49 @@ class AILiveRepository:
             runtime.scan_interval_seconds = settings.ai_scan_interval_seconds
             runtime.heartbeat_at = now
             runtime.updated_at = now
+
+    def save_fee_rates(self, rates: dict[str, BybitFeeRateSnapshot]) -> None:
+        now = datetime.now(UTC)
+        with self.session_factory.begin() as session:
+            for symbol, snapshot in rates.items():
+                record = session.get(BybitFeeRateCacheRecord, symbol)
+                if record is None:
+                    record = BybitFeeRateCacheRecord(
+                        symbol=symbol,
+                        maker_fee_rate=snapshot.maker_fee_rate,
+                        taker_fee_rate=snapshot.taker_fee_rate,
+                        verified_at=snapshot.verified_at,
+                        updated_at=now,
+                    )
+                    session.add(record)
+                else:
+                    record.maker_fee_rate = snapshot.maker_fee_rate
+                    record.taker_fee_rate = snapshot.taker_fee_rate
+                    record.verified_at = snapshot.verified_at
+                    record.updated_at = now
+
+    def cached_fee_rates(
+        self, now: datetime | None = None
+    ) -> dict[str, BybitFeeRateSnapshot]:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        with self.session_factory() as session:
+            rows = session.scalars(select(BybitFeeRateCacheRecord)).all()
+            snapshots: dict[str, BybitFeeRateSnapshot] = {}
+            for row in rows:
+                verified = row.verified_at
+                if verified.tzinfo is None:
+                    verified = verified.replace(tzinfo=UTC)
+                else:
+                    verified = verified.astimezone(UTC)
+                if current - verified > FEE_CACHE_MAX_AGE:
+                    continue
+                snapshots[row.symbol] = BybitFeeRateSnapshot(
+                    row.symbol,
+                    Decimal(row.maker_fee_rate),
+                    validate_taker_fee_rate(Decimal(row.taker_fee_rate)),
+                    verified,
+                )
+            return snapshots
 
     def begin_scan(self, scheduled_at: datetime, model: str) -> str | None:
         scan_id = sha256(f"{AI_RUNTIME_NAME}:{scheduled_at.isoformat()}".encode()).hexdigest()
@@ -552,6 +674,7 @@ def build_ai_preview(
     scan_id: str,
     decision: AIDecision,
     instrument: ScannerInstrument,
+    taker_fee_rate: Decimal,
 ) -> ManualExecutionPreview:
     if decision.symbol != instrument.symbol or not instrument.enabled:
         raise ControlledLiveBlocked(instrument.exclusion_reason or "Instrument is disabled")
@@ -574,12 +697,21 @@ def build_ai_preview(
     stop, target = _validated_levels(
         side, entry, raw_stop, raw_target, instrument.tick_size
     )
-    risk = abs(entry - stop)
-    reward = abs(target - entry)
-    entry_fee = notional * BYBIT_TAKER_FEE_RATE
-    exit_fee = quantity * stop * BYBIT_TAKER_FEE_RATE
-    slippage = quantity * (entry + stop) * CONTROLLED_LIVE_V1.estimated_slippage_per_leg
-    maximum_loss = quantity * risk + entry_fee + exit_fee + slippage
+    try:
+        costs = estimate_live_costs(
+            side=side,
+            quantity=quantity,
+            entry=entry,
+            stop=stop,
+            target=target,
+            bid=instrument.bid,
+            ask=instrument.ask,
+            taker_fee_rate=taker_fee_rate,
+            slippage_per_leg=CONTROLLED_LIVE_V1.estimated_slippage_per_leg,
+        )
+        require_cost_aware_edge(costs)
+    except ValueError as error:
+        raise ControlledLiveBlocked(str(error)) from error
     proposal_id = sha256(
         f"{AI_SIGNAL_SOURCE}:{scan_id}:{decision.symbol}:{decision.action}".encode()
     ).hexdigest()[:32]
@@ -595,15 +727,63 @@ def build_ai_preview(
         quantity=quantity,
         expected_notional=notional,
         leverage=AI_LEVERAGE,
-        expected_fee=entry_fee + exit_fee,
-        estimated_slippage=slippage,
+        expected_fee=costs.entry_fee + costs.target_exit_fee,
+        estimated_slippage=costs.target_slippage,
         stop_loss=stop,
         take_profit=target,
-        maximum_planned_loss=maximum_loss,
-        risk_reward_ratio=reward / risk,
+        maximum_planned_loss=costs.net_risk,
+        risk_reward_ratio=costs.net_rr,
         executable=True,
         reason=decision.reason,
+        taker_fee_rate=costs.taker_fee_rate,
+        estimated_spread=costs.spread_cost,
+        expected_net_edge=costs.net_reward,
     )
+
+
+def _frame_trend(rows: tuple[ClosedCandle, ...]) -> Literal["BULLISH", "BEARISH", "MIXED"]:
+    closes = [item.close for item in rows]
+    ema_21 = ema(closes, 21)
+    ema_50 = ema(closes, 50)
+    if ema_21 is None or ema_50 is None or len(closes) < 4 or closes[-4] <= 0:
+        return "MIXED"
+    momentum = closes[-1] / closes[-4] - 1
+    if closes[-1] < ema_21 < ema_50 and momentum < 0:
+        return "BEARISH"
+    if closes[-1] > ema_21 > ema_50 and momentum > 0:
+        return "BULLISH"
+    return "MIXED"
+
+
+def require_trend_confirmation(
+    decision: AIDecision, frames: dict[str, tuple[ClosedCandle, ...]]
+) -> None:
+    higher = (_frame_trend(frames["15m"]), _frame_trend(frames["1h"]))
+    if decision.action == "LONG" and higher == ("BEARISH", "BEARISH"):
+        raise ControlledLiveBlocked("LONG blocked by bearish 15m + 1h EMA/momentum trend")
+    if decision.action == "SHORT" and higher == ("BULLISH", "BULLISH"):
+        raise ControlledLiveBlocked("SHORT blocked by bullish 15m + 1h EMA/momentum trend")
+
+
+def require_same_symbol_cooldown(
+    decision: AIDecision,
+    recent_closes: tuple[RecentClosedPosition, ...],
+    now: datetime,
+) -> None:
+    latest = next(
+        (
+            item
+            for item in reversed(recent_closes)
+            if item.symbol == decision.symbol and item.closed_at <= now
+        ),
+        None,
+    )
+    if latest is None or now - latest.closed_at >= SAME_SYMBOL_COOLDOWN:
+        return
+    if latest.exit_reason == "SL":
+        raise ControlledLiveBlocked("Same-symbol 60m cooldown after Stop Loss")
+    if latest.direction != decision.action:
+        raise ControlledLiveBlocked("Opposite same-symbol entry is blocked for 60 minutes")
 
 
 def _validated_levels(
@@ -682,6 +862,10 @@ def format_ai_live_status_ru(status: AILiveStatus) -> str:
         "🧱 Margin: ISOLATED",
         f"⚡ Leverage: {AI_LEVERAGE}x",
         f"💰 Position size: ~${AI_POSITION_NOTIONAL}",
+        f"AI confidence threshold: {AI_CONFIDENCE_THRESHOLD}",
+        "NET R/R gate: ≥ 1.5 after fees/spread/slippage",
+        "Same-symbol reversal/SL cooldown: 60m",
+        "15m + 1h countertrend filter: ACTIVE",
         "Scan interval: 5m",
         f"Last scan: {_time(status.last_scan_at)}",
         f"Total scans: {status.total_scans}",
@@ -844,9 +1028,13 @@ class AIAutonomousTrader:
             result = AIBatchDecision.model_validate(raw)
             if {item.symbol for item in result.decisions} != set(SCANNER_CONFIG.symbols):
                 raise ValueError("AI must return exactly one decision for every symbol")
+            fee_rates = await self._fee_rates(current)
+            recent_closes = await self.market_reader.recent_closes()
             next_scan = scheduled + timedelta(seconds=self.settings.ai_scan_interval_seconds)
             self.repository.complete_scan(scan_id, request_hash, result, market, next_scan)
-            executions = await self._execute_candidates(scan_id, result, market)
+            executions = await self._execute_candidates(
+                scan_id, result, market, fee_rates, recent_closes
+            )
             return {
                 "status": "COMPLETED",
                 "scan_id": scan_id,
@@ -869,6 +1057,8 @@ class AIAutonomousTrader:
         scan_id: str,
         result: AIBatchDecision,
         market: AIMarketSnapshot,
+        fee_rates: dict[str, BybitFeeRateSnapshot],
+        recent_closes: tuple[RecentClosedPosition, ...],
     ) -> list[dict[str, Any]]:
         candidates = [
             item
@@ -899,8 +1089,13 @@ class AIAutonomousTrader:
                 )
                 continue
             try:
+                require_same_symbol_cooldown(decision, recent_closes, market.fetched_at)
+                require_trend_confirmation(decision, market.candles[decision.symbol])
                 preview = build_ai_preview(
-                    scan_id, decision, market.scanner.instruments[decision.symbol]
+                    scan_id,
+                    decision,
+                    market.scanner.instruments[decision.symbol],
+                    fee_rates[decision.symbol].taker_fee_rate,
                 )
                 if (
                     preview.expected_notional / AI_LEVERAGE + preview.expected_fee
@@ -953,6 +1148,22 @@ class AIAutonomousTrader:
                 )
                 break
         return outcomes
+
+    async def _fee_rates(
+        self, now: datetime
+    ) -> dict[str, BybitFeeRateSnapshot]:
+        try:
+            rates = await self.market_reader.fee_rates(now)
+            self.repository.save_fee_rates(rates)
+            return rates
+        except Exception as error:
+            cached = self.repository.cached_fee_rates(now)
+            missing = ALLOWED_SCANNER_SYMBOLS - set(cached)
+            if missing:
+                raise ControlledLiveBlocked(
+                    "Bybit fee API unavailable and no fresh persisted fee cache exists"
+                ) from error
+            return cached
 
     async def close(self) -> None:
         await self.market_reader.close()

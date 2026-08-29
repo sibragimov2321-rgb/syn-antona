@@ -38,8 +38,10 @@ PRIVATE_GET_PATHS = frozenset(
     {
         "/v5/user/query-api",
         "/v5/account/info",
+        "/v5/account/fee-rate",
         "/v5/account/wallet-balance",
         "/v5/position/list",
+        "/v5/position/closed-pnl",
         "/v5/order/realtime",
         "/v5/order/history",
         "/v5/execution/list",

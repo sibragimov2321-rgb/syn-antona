@@ -24,12 +24,14 @@ from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.db import (
+    BybitFeeRateCacheRecord,
     ControlledLiveProposalRecord,
     ControlledLiveStateRecord,
     ExecutionOrderRecord,
 )
 from app.exchanges.bybit_balance import derivatives_available_balance
 from app.exchanges.bybit_readonly import permission_summary
+from app.exchanges.models import OrderSide
 from app.trading.controlled_live import (
     ArmingGates,
     BYBIT_TAKER_FEE_RATE,
@@ -49,6 +51,11 @@ from app.trading.execution_store import (
     OrderOutcomeUnknown,
     OrderRejected,
 )
+from app.trading.live_costs import (
+    estimate_live_costs,
+    require_cost_aware_edge,
+    validate_taker_fee_rate,
+)
 from app.trading.controlled_universe import (
     AI_SIGNAL_SOURCE,
     SCANNER_CONFIG,
@@ -63,6 +70,7 @@ ALLOWED_SYMBOL = "SOLUSDT"
 ALLOWED_SYMBOLS = frozenset(SCANNER_CONFIG.symbols)
 MAX_NOTIONAL = Decimal("10")
 AI_MAX_NOTIONAL = Decimal("15")
+FEE_CACHE_MAX_AGE = timedelta(hours=24)
 MUTATING_PATHS = frozenset(
     {
         "/v5/order/create",
@@ -274,6 +282,8 @@ class ProductionMutationGuard:
             raise ControlledLiveBlocked("Emergency kill switch is active")
         if proposal.admin_telegram_id not in get_settings().admin_telegram_ids:
             raise ControlledLiveBlocked("Persistent approval does not belong to an active admin")
+        if not risk_reducing and _decimal(preview.get("leverage")) != CONTROLLED_LIVE_V1.leverage:
+            raise ControlledLiveBlocked("Proposal leverage does not match fixed production leverage")
 
         permissions = permission_summary(await self._http.private_get("/v5/user/query-api", {}))
         if permissions["read"] != "YES" or permissions["trade"] != "YES":
@@ -297,7 +307,9 @@ class ProductionMutationGuard:
         minimum_notional = _decimal(lot.get("minNotionalValue"))
         if instrument.get("status") != "Trading" or instrument.get("contractType") != "LinearPerpetual":
             raise ControlledLiveBlocked(f"{symbol} LinearPerpetual is not Trading")
-        notional = quantity * ask
+        preview_side = str(preview.get("side") or "")
+        executable_entry = ask if preview_side == "BUY" else bid
+        notional = quantity * executable_entry
         if not risk_reducing:
             midpoint = (bid + ask) / 2
             spread_pct = (
@@ -329,6 +341,25 @@ class ProductionMutationGuard:
                 > SCANNER_CONFIG.maximum_actual_minimum_notional
             ):
                 raise ControlledLiveBlocked("Current actual minimum order exceeds $10")
+            if ai_source:
+                taker_fee_rate = await self._account_taker_fee_rate(symbol)
+                try:
+                    costs = estimate_live_costs(
+                        side=OrderSide.BUY if preview_side == "BUY" else OrderSide.SELL,
+                        quantity=quantity,
+                        entry=executable_entry,
+                        stop=_decimal(preview.get("stop_loss")),
+                        target=_decimal(preview.get("take_profit")),
+                        bid=bid,
+                        ask=ask,
+                        taker_fee_rate=taker_fee_rate,
+                        slippage_per_leg=CONTROLLED_LIVE_V1.estimated_slippage_per_leg,
+                    )
+                    require_cost_aware_edge(costs)
+                except ValueError as error:
+                    raise ControlledLiveBlocked(
+                        f"BLOCKED_BEFORE_HTTP: {error}"
+                    ) from error
 
         positions = await self._http.private_get(
             "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}
@@ -380,7 +411,9 @@ class ProductionMutationGuard:
             if equity <= 0:
                 raise ControlledLiveBlocked("Account equity must be positive")
             required_margin = notional / CONTROLLED_LIVE_V1.leverage
-            expected_entry_fee = notional * BYBIT_TAKER_FEE_RATE
+            expected_entry_fee = notional * (
+                taker_fee_rate if ai_source else BYBIT_TAKER_FEE_RATE
+            )
             if ai_source and required_margin + expected_entry_fee > available_balance:
                 raise ControlledLiveBlocked("Insufficient available balance")
             if ai_source:
@@ -423,6 +456,60 @@ class ProductionMutationGuard:
         else:
             open_planned_risk = Decimal()
         return GuardSnapshot(ask, open_positions, equity, daily_pnl, open_planned_risk)
+
+    async def _account_taker_fee_rate(self, symbol: str) -> Decimal:
+        now = datetime.now(UTC)
+        try:
+            result = await self._http.private_get(
+                "/v5/account/fee-rate", {"category": "linear", "symbol": symbol}
+            )
+            item = next(
+                (
+                    row
+                    for row in result.get("list") or []
+                    if str(row.get("symbol") or "") == symbol
+                ),
+                None,
+            )
+            if item is None:
+                raise BybitGatewayError("Bybit fee API omitted the requested symbol")
+            taker = validate_taker_fee_rate(_decimal(item.get("takerFeeRate")))
+            maker = _decimal(item.get("makerFeeRate"))
+            with self._sessions.begin() as session:
+                record = session.get(BybitFeeRateCacheRecord, symbol)
+                if record is None:
+                    session.add(
+                        BybitFeeRateCacheRecord(
+                            symbol=symbol,
+                            maker_fee_rate=maker,
+                            taker_fee_rate=taker,
+                            verified_at=now,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    record.maker_fee_rate = maker
+                    record.taker_fee_rate = taker
+                    record.verified_at = now
+                    record.updated_at = now
+            return taker
+        except (BybitGatewayError, ValueError, httpx.HTTPError) as error:
+            with self._sessions() as session:
+                record = session.get(BybitFeeRateCacheRecord, symbol)
+                if record is None:
+                    raise ControlledLiveBlocked(
+                        "Bybit fee API unavailable and no confirmed fee cache exists"
+                    ) from error
+                verified = record.verified_at
+                if verified.tzinfo is None:
+                    verified = verified.replace(tzinfo=UTC)
+                else:
+                    verified = verified.astimezone(UTC)
+                if now - verified > FEE_CACHE_MAX_AGE:
+                    raise ControlledLiveBlocked(
+                        "Persisted Bybit fee rate is stale"
+                    ) from error
+                return validate_taker_fee_rate(Decimal(record.taker_fee_rate))
 
     async def _daily_executions(self) -> list[dict[str, Any]]:
         params: dict[str, Any] = {

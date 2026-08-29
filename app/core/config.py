@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     ai_api_key: str | None = None
     ai_base_url: str | None = None
     ai_trading_enabled: bool = False
-    ai_confidence_threshold: int = 70
+    ai_confidence_threshold: int = 75
     ai_scan_interval_seconds: int = 300
     ai_position_notional_usdt: float = 15.0
     ai_timeout: float = 45.0
@@ -74,8 +74,8 @@ class Settings(BaseSettings):
                 raise RuntimeError(
                     "AI live execution requires all production arming gates and DRY_RUN=false"
                 )
-            if self.ai_confidence_threshold != 70:
-                raise RuntimeError("AI_CONFIDENCE_THRESHOLD must remain 70")
+            if self.ai_confidence_threshold != 75:
+                raise RuntimeError("AI_CONFIDENCE_THRESHOLD must remain 75")
             if self.ai_scan_interval_seconds != 300:
                 raise RuntimeError("AI_SCAN_INTERVAL_SECONDS must remain 300")
             if self.ai_position_notional_usdt != 15.0:

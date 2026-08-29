@@ -15,15 +15,23 @@ from app.ai.live_trader import (
     AIDecision,
     AILiveRepository,
     AIMarketSnapshot,
+    RecentClosedPosition,
     ClosedCandle,
     build_ai_preview,
     build_ai_prompt,
+    require_same_symbol_cooldown,
+    require_trend_confirmation,
     save_ai_proposal,
 )
 from app.core.config import Settings, get_settings
-from app.db import Base, ControlledLiveStateRecord, ExecutionOrderRecord
+from app.db import (
+    Base,
+    BybitFeeRateCacheRecord,
+    ControlledLiveStateRecord,
+    ExecutionOrderRecord,
+)
 from app.exchanges.models import OrderSide
-from app.exchanges.bybit_v5_gateway import ProductionMutationGuard
+from app.exchanges.bybit_v5_gateway import BybitGatewayError, ProductionMutationGuard
 from app.trading.controlled_live import (
     CONTROLLED_LIVE_V1,
     ControlledLiveBlocked,
@@ -84,15 +92,15 @@ def test_ai_decision_schema_and_fixed_notional_preview() -> None:
         take_profit=1.04,
         reason="volatility and momentum agree",
     )
-    preview = build_ai_preview("scan-1", decision, _instrument())
-    assert AI_CONFIDENCE_THRESHOLD == 70
+    preview = build_ai_preview("scan-1", decision, _instrument(), Decimal("0.001"))
+    assert AI_CONFIDENCE_THRESHOLD == 75
     assert preview.side == OrderSide.BUY.value
     assert preview.leverage == AI_LEVERAGE == Decimal("10")
     assert preview.expected_notional == AI_POSITION_NOTIONAL == Decimal("15")
     assert preview.quantity == Decimal("15")
     assert preview.stop_loss < Decimal("1") < preview.take_profit
     assert preview.client_order_id == build_ai_preview(
-        "scan-1", decision, _instrument()
+        "scan-1", decision, _instrument(), Decimal("0.001")
     ).client_order_id
 
 
@@ -105,12 +113,96 @@ def test_ai_short_and_invalid_levels_fail_closed() -> None:
         take_profit=0.96,
         reason="downside momentum",
     )
-    preview = build_ai_preview("scan-2", short, _instrument())
+    preview = build_ai_preview("scan-2", short, _instrument(), Decimal("0.001"))
     assert preview.side == OrderSide.SELL.value
     assert preview.take_profit < Decimal("1") < preview.stop_loss
     invalid = short.model_copy(update={"stop_loss": 0.99})
     with pytest.raises(ControlledLiveBlocked, match="ordering"):
-        build_ai_preview("scan-3", invalid, _instrument())
+        build_ai_preview("scan-3", invalid, _instrument(), Decimal("0.001"))
+
+
+def test_ai_confidence_74_is_blocked() -> None:
+    decision = AIDecision(
+        symbol="XRPUSDT",
+        action="LONG",
+        confidence=74,
+        stop_loss=0.98,
+        take_profit=1.04,
+        reason="below corrected confidence gate",
+    )
+    with pytest.raises(ControlledLiveBlocked, match="threshold"):
+        build_ai_preview("scan-confidence", decision, _instrument(), Decimal("0.001"))
+
+
+def test_net_rr_and_real_fee_are_enforced() -> None:
+    weak = AIDecision(
+        symbol="XRPUSDT",
+        action="LONG",
+        confidence=80,
+        stop_loss=0.98,
+        take_profit=1.03,
+        reason="gross rr is not net rr",
+    )
+    with pytest.raises(ControlledLiveBlocked, match="NET R/R"):
+        build_ai_preview("scan-net-rr", weak, _instrument(), Decimal("0.001"))
+
+    strong = weak.model_copy(update={"take_profit": 1.04})
+    preview = build_ai_preview(
+        "scan-real-fee", strong, _instrument(), Decimal("0.001")
+    )
+    assert preview.taker_fee_rate == Decimal("0.001")
+    assert preview.expected_fee == preview.quantity * (
+        Decimal("1") + preview.take_profit
+    ) * Decimal("0.001")
+    assert preview.risk_reward_ratio >= Decimal("1.5")
+    assert preview.expected_net_edge > 0
+
+
+def _trend_rows(*, bullish: bool) -> tuple[ClosedCandle, ...]:
+    now = datetime(2026, 8, 30, tzinfo=UTC)
+    closes = [
+        Decimal("1") + (Decimal(index) / Decimal("1000")) * (1 if bullish else -1)
+        for index in range(80)
+    ]
+    return tuple(
+        ClosedCandle(
+            now + timedelta(minutes=index),
+            now + timedelta(minutes=index + 1),
+            close,
+            close + Decimal("0.001"),
+            close - Decimal("0.001"),
+            close,
+            Decimal("100"),
+        )
+        for index, close in enumerate(closes)
+    )
+
+
+def test_countertrend_and_same_symbol_cooldown_block() -> None:
+    short = AIDecision(
+        symbol="XRPUSDT", action="SHORT", confidence=80,
+        stop_loss=1.02, take_profit=0.96, reason="countertrend",
+    )
+    bullish = _trend_rows(bullish=True)
+    with pytest.raises(ControlledLiveBlocked, match="bullish 15m.*1h"):
+        require_trend_confirmation(short, {"15m": bullish, "1h": bullish})
+
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    recent_sl = RecentClosedPosition(
+        "XRPUSDT", "SHORT", now - timedelta(minutes=59), "SL"
+    )
+    with pytest.raises(ControlledLiveBlocked, match="60m cooldown"):
+        require_same_symbol_cooldown(short, (recent_sl,), now)
+    recent_tp = RecentClosedPosition(
+        "XRPUSDT", "LONG", now - timedelta(minutes=59), "TP"
+    )
+    with pytest.raises(ControlledLiveBlocked, match="Opposite"):
+        require_same_symbol_cooldown(short, (recent_tp,), now)
+    require_same_symbol_cooldown(
+        short,
+        (RecentClosedPosition("XRPUSDT", "LONG", now - timedelta(minutes=60), "TP"),),
+        now,
+    )
 
 
 def test_ai_batch_rejects_duplicate_or_unknown_symbols() -> None:
@@ -256,7 +348,7 @@ async def test_ai_execution_records_fill_protection_and_reconciliation() -> None
         take_profit=1.04,
         reason="test",
     )
-    preview = build_ai_preview("scan-ok", decision, _instrument())
+    preview = build_ai_preview("scan-ok", decision, _instrument(), Decimal("0.001"))
     save_ai_proposal(controlled, preview, 123)
     fill = await AIAutonomousExecutionService(controlled, _Gateway()).execute(
         preview, account_id="account"
@@ -280,7 +372,7 @@ async def test_ai_unknown_activates_kill_switch_and_never_retries() -> None:
         take_profit=1.04,
         reason="test",
     )
-    preview = build_ai_preview("scan-timeout", decision, _instrument())
+    preview = build_ai_preview("scan-timeout", decision, _instrument(), Decimal("0.001"))
     save_ai_proposal(controlled, preview, 123)
     gateway = _Gateway(fail=True)
     with pytest.raises(RuntimeError, match="UNKNOWN"):
@@ -324,6 +416,14 @@ class _GuardHttp:
             }
         if path == "/v5/account/info":
             return {"marginMode": "ISOLATED_MARGIN"}
+        if path == "/v5/account/fee-rate":
+            return {
+                "list": [{
+                    "symbol": params.get("symbol", "XRPUSDT"),
+                    "makerFeeRate": "0.0004",
+                    "takerFeeRate": "0.001",
+                }]
+            }
         if path == "/v5/position/list":
             return {"list": []}
         if path == "/v5/order/realtime":
@@ -333,6 +433,26 @@ class _GuardHttp:
         if path == "/v5/execution/list":
             return {"list": [{"orderId": "old-loss", "execPnl": "-5", "execFee": "0"}]}
         raise AssertionError(path)
+
+
+class _HighFeeGuardHttp(_GuardHttp):
+    async def private_get(self, path, params):
+        if path == "/v5/account/fee-rate":
+            return {
+                "list": [{
+                    "symbol": params.get("symbol", "XRPUSDT"),
+                    "makerFeeRate": "0.0004",
+                    "takerFeeRate": "0.003",
+                }]
+            }
+        return await super().private_get(path, params)
+
+
+class _UnavailableFeeGuardHttp(_GuardHttp):
+    async def private_get(self, path, params):
+        if path == "/v5/account/fee-rate":
+            raise BybitGatewayError("fee API unavailable")
+        return await super().private_get(path, params)
 
 
 def _arm_ai(monkeypatch, enabled: str = "true") -> None:
@@ -368,6 +488,7 @@ async def test_production_guard_allows_exact_15_ai_notional_and_ignores_old_loss
             reason="test",
         ),
         _instrument(),
+        Decimal("0.001"),
     )
     save_ai_proposal(controlled, preview, 123)
     result = await ProductionMutationGuard(sessions, _GuardHttp()).authorize(
@@ -397,6 +518,7 @@ async def test_production_guard_blocks_ai_source_when_ai_flag_is_false(monkeypat
             reason="test",
         ),
         _instrument(),
+        Decimal("0.001"),
     )
     save_ai_proposal(controlled, preview, 123)
     monkeypatch.setenv("AI_TRADING_ENABLED", "false")
@@ -408,4 +530,70 @@ async def test_production_guard_blocks_ai_source_when_ai_flag_is_false(monkeypat
             quantity=Decimal("15"),
             client_order_id=preview.client_order_id,
         )
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_production_guard_recalculates_fee_and_net_rr_before_http(monkeypatch) -> None:
+    _arm_ai(monkeypatch)
+    sessions = _sessions()
+    controlled = ControlledLiveRepository(sessions)
+    controlled.state()
+    preview = build_ai_preview(
+        "guard-high-fee",
+        AIDecision(
+            symbol="XRPUSDT", action="LONG", confidence=80,
+            stop_loss=0.98, take_profit=1.04, reason="test",
+        ),
+        _instrument(),
+        Decimal("0.001"),
+    )
+    save_ai_proposal(controlled, preview, 123)
+    with pytest.raises(ControlledLiveBlocked, match="BLOCKED_BEFORE_HTTP.*NET R/R"):
+        await ProductionMutationGuard(sessions, _HighFeeGuardHttp()).authorize(
+            action="CREATE",
+            symbol="XRPUSDT",
+            quantity=Decimal("15"),
+            client_order_id=preview.client_order_id,
+        )
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_fee_api_fails_closed_or_uses_fresh_persisted_cache(monkeypatch) -> None:
+    _arm_ai(monkeypatch)
+    sessions = _sessions()
+    controlled = ControlledLiveRepository(sessions)
+    controlled.state()
+    preview = build_ai_preview(
+        "guard-fee-cache",
+        AIDecision(
+            symbol="XRPUSDT", action="LONG", confidence=80,
+            stop_loss=0.98, take_profit=1.04, reason="test",
+        ),
+        _instrument(),
+        Decimal("0.001"),
+    )
+    save_ai_proposal(controlled, preview, 123)
+    guard = ProductionMutationGuard(sessions, _UnavailableFeeGuardHttp())
+    with pytest.raises(ControlledLiveBlocked, match="no confirmed fee cache"):
+        await guard.authorize(
+            action="CREATE", symbol="XRPUSDT", quantity=Decimal("15"),
+            client_order_id=preview.client_order_id,
+        )
+    with sessions.begin() as session:
+        session.add(
+            BybitFeeRateCacheRecord(
+                symbol="XRPUSDT",
+                maker_fee_rate=Decimal("0.0004"),
+                taker_fee_rate=Decimal("0.001"),
+                verified_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+    result = await guard.authorize(
+        action="CREATE", symbol="XRPUSDT", quantity=Decimal("15"),
+        client_order_id=preview.client_order_id,
+    )
+    assert result.equity == Decimal("50")
     get_settings.cache_clear()

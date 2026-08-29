@@ -419,6 +419,20 @@ class AILiveDecisionRecord(Base):
     )
 
 
+class BybitFeeRateCacheRecord(Base):
+    """Latest account-specific Bybit fee rate used by the live entry gates."""
+
+    __tablename__ = "bybit_fee_rate_cache"
+
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    maker_fee_rate: Mapped[Decimal] = mapped_column(Numeric(24, 12))
+    taker_fee_rate: Mapped[Decimal] = mapped_column(Numeric(24, 12))
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class HistoricalCandleRecord(Base):
     __tablename__ = "historical_candles"
     __table_args__ = (

@@ -254,6 +254,9 @@ class ManualExecutionPreview:
     risk_reward_ratio: Decimal
     executable: bool
     reason: str
+    taker_fee_rate: Decimal = Decimal()
+    estimated_spread: Decimal = Decimal()
+    expected_net_edge: Decimal = Decimal()
 
     @property
     def client_order_id(self) -> str:
