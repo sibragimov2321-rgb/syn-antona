@@ -41,8 +41,14 @@ class OpenAICompatibleProvider(AIProvider):
             if self.settings.ai_provider == "openai"
             else "https://openrouter.ai/api/v1"
         )).rstrip("/")
-        if not base.startswith("https://"):
-            raise AIUnavailable("AI_BASE_URL must use HTTPS")
+        # This exact authenticated endpoint is private to our Railway environment.
+        # Keep HTTPS mandatory for every other provider/host (no generic HTTP bypass).
+        private_hermes = (
+            base == "http://hermes.railway.internal:8642/v1"
+            and self.settings.ai_model == "hermes-agent"
+        )
+        if not base.startswith("https://") and not private_hermes:
+            raise AIUnavailable("AI_BASE_URL must use HTTPS or the approved Railway Hermes endpoint")
         headers = {"Authorization": f"Bearer {self.settings.ai_api_key}"}
         body = {
             "model": self.settings.ai_model,
@@ -72,7 +78,9 @@ class OpenAICompatibleProvider(AIProvider):
             },
         }
         try:
-            async with httpx.AsyncClient(timeout=self.settings.ai_timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.settings.ai_timeout, follow_redirects=False
+            ) as client:
                 response = await client.post(f"{base}/chat/completions", headers=headers, json=body)
             if response.status_code == 429: raise AIRateLimited("AI rate limited")
             response.raise_for_status()
