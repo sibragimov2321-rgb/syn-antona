@@ -179,6 +179,9 @@ class OpenAICompatibleProvider(AIProvider):
             body["messages"][1]["content"] = _hermes_prompt_content(prompt)
             body["messages"][0]["content"] += (
                 "\nReturn ONLY valid JSON. No markdown, no code fences, no explanation outside JSON."
+                "\nUse only the supplied market snapshot. Do not call tools, browse, execute code,"
+                " or delegate. Respond directly in one compact JSON object; keep each reason"
+                " to one short sentence. Do not replace analysis with a fabricated decision."
                 "\nMatch the complete JSON Schema below. Include EVERY required property,"
                 " including nullable properties. Do not add extra fields or guess missing values."
                 "\nJSON Schema:\n" + json.dumps(schema.model_json_schema(), separators=(",", ":"))
