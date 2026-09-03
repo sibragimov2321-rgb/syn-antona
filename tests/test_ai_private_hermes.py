@@ -46,6 +46,9 @@ async def test_private_hermes_uses_authenticated_request_without_redirects(monke
     assert captured["url"] == "http://hermes.railway.internal:8642/v1/chat/completions"
     assert captured["headers"] == {"Authorization": "Bearer test-key"}
     assert captured["options"]["follow_redirects"] is False
+    timeout = captured["options"]["timeout"]
+    assert timeout.read == 120.0
+    assert timeout.connect == timeout.write == timeout.pool == settings.ai_timeout
     assert captured["body"]["model"] == "hermes-agent"
     assert "response_format" not in captured["body"]
     instruction = captured["body"]["messages"][0]["content"]

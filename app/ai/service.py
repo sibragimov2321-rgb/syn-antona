@@ -194,8 +194,15 @@ class OpenAICompatibleProvider(AIProvider):
                     " LONG/SHORT must include concrete numeric levels from the supplied data."
                 )
         try:
+            # Real Railway Hermes multi-symbol completions can take ~75s.
+            # Bound the response wait separately; keep connection/write/pool
+            # timeouts and every downstream fresh-quote/execution gate intact.
+            timeout = (
+                httpx.Timeout(self.settings.ai_timeout, read=max(120.0, self.settings.ai_timeout))
+                if private_hermes else self.settings.ai_timeout
+            )
             async with httpx.AsyncClient(
-                timeout=self.settings.ai_timeout, follow_redirects=False
+                timeout=timeout, follow_redirects=False
             ) as client:
                 # One bounded *AI-only* retry for invalid Hermes output. HTTP,
                 # authentication, rate-limit and timeout failures are not retried.
