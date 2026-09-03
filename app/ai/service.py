@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -26,6 +27,87 @@ class MockAIProvider(AIProvider):
         self.calls += 1
         if isinstance(self.response, Exception): raise self.response
         return self.response
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON property")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("Non-finite JSON number")
+
+
+def _hermes_prompt_content(prompt: str) -> str | list[dict[str, str]]:
+    """Preserve large JSON prompts across Hermes' 64-KiB per-text-part cap.
+
+    Hermes accepts standard text content parts and joins them with newlines.
+    Split only after JSON punctuation outside strings, where that whitespace
+    cannot change any market values. Never truncate or summarize market data.
+    """
+    if len(prompt) <= 65_536:
+        return prompt
+    try:
+        json.loads(prompt, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
+        parts = []
+        start = boundary = 0
+        in_string = escaped = False
+        for index, char in enumerate(prompt):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char in ",:{}[]":
+                boundary = index + 1
+            if index + 1 - start >= 32_768:
+                if boundary <= start:
+                    raise ValueError("JSON token cannot fit in a text part")
+                parts.append(prompt[start:boundary])
+                start = boundary
+        if start < len(prompt):
+            parts.append(prompt[start:])
+        if len(parts) > 100:
+            raise ValueError("Too many text parts")
+        return [{"type": "text", "text": part} for part in parts]
+    except ValueError as error:
+        raise AIUnavailable("Hermes input cannot be transmitted without truncation") from error
+
+
+def parse_hermes_response(payload: object, schema: type[BaseModel]) -> dict:
+    """Parse the observed Chat Completions envelope; never repair trading data."""
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid response envelope")
+        choice = payload["choices"][0]
+        if choice.get("finish_reason") not in (None, "stop"):
+            raise ValueError("Incomplete or failed completion")
+        content = choice["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError("Content must be text")
+        content = content.strip()
+        fence = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", content, re.S | re.I)
+        if fence:
+            content = fence.group(1)
+        result = json.loads(
+            content, object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        if not isinstance(result, dict):
+            raise ValueError("JSON root must be an object")
+        schema.model_validate(result)
+        # Validation is a gate, not a repair: return the original parsed values.
+        return result
+    except (KeyError, IndexError, TypeError, AttributeError, ValueError) as error:
+        raise AIUnavailable("Hermes response does not match the required JSON schema") from error
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -77,6 +159,25 @@ class OpenAICompatibleProvider(AIProvider):
                 },
             },
         }
+        if private_hermes:
+            # The deployed Hermes API ignores response_format (both json_schema
+            # and json_object). Pass the schema as text instead of relying on a
+            # successful HTTP response to imply structured-output support.
+            body.pop("response_format")
+            body["messages"][1]["content"] = _hermes_prompt_content(prompt)
+            body["messages"][0]["content"] += (
+                "\nReturn ONLY valid JSON. No markdown, no code fences, no explanation outside JSON."
+                "\nMatch the complete JSON Schema below. Include EVERY required property,"
+                " including nullable properties. Do not add extra fields or guess missing values."
+                "\nJSON Schema:\n" + json.dumps(schema.model_json_schema(), separators=(",", ":"))
+            )
+            if "decisions" in schema.model_json_schema().get("properties", {}):
+                body["messages"][0]["content"] += (
+                    "\nReturn the top-level decisions array with exactly one decision for EVERY"
+                    " requested symbol, not a selected subset or a standalone decision."
+                    " WAIT decisions must include stop_loss and take_profit explicitly as null."
+                    " LONG/SHORT must include concrete numeric levels from the supplied data."
+                )
         try:
             async with httpx.AsyncClient(
                 timeout=self.settings.ai_timeout, follow_redirects=False
@@ -84,6 +185,8 @@ class OpenAICompatibleProvider(AIProvider):
                 response = await client.post(f"{base}/chat/completions", headers=headers, json=body)
             if response.status_code == 429: raise AIRateLimited("AI rate limited")
             response.raise_for_status()
+            if private_hermes:
+                return parse_hermes_response(response.json(), schema)
             content = response.json()["choices"][0]["message"]["content"]
             if not isinstance(content, str):
                 raise ValueError("AI response content is not a JSON string")

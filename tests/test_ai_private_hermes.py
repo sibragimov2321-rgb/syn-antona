@@ -1,11 +1,17 @@
 import json
+from typing import Literal
 
 import httpx
 import pytest
+from pydantic import BaseModel
 
 from app.ai.models import AIResult
 from app.ai.service import AIUnavailable, OpenAICompatibleProvider
 from app.core.config import Settings
+
+
+class ConnectivityReply(BaseModel):
+    status: Literal["OK"]
 
 
 @pytest.mark.asyncio
@@ -35,13 +41,16 @@ async def test_private_hermes_uses_authenticated_request_without_redirects(monke
         ai_api_key="test-key", ai_model="hermes-agent",
         ai_base_url="http://hermes.railway.internal:8642/v1" + suffix,
     )
-    result = await OpenAICompatibleProvider(settings).complete_json("connectivity only", AIResult)
+    result = await OpenAICompatibleProvider(settings).complete_json("connectivity only", ConnectivityReply)
     assert result == {"status": "OK"}
     assert captured["url"] == "http://hermes.railway.internal:8642/v1/chat/completions"
     assert captured["headers"] == {"Authorization": "Bearer test-key"}
     assert captured["options"]["follow_redirects"] is False
     assert captured["body"]["model"] == "hermes-agent"
-    assert captured["body"]["response_format"]["json_schema"]["strict"] is True
+    assert "response_format" not in captured["body"]
+    instruction = captured["body"]["messages"][0]["content"]
+    assert "Return ONLY valid JSON. No markdown, no code fences, no explanation outside JSON." in instruction
+    assert json.dumps(ConnectivityReply.model_json_schema(), separators=(",", ":")) in instruction
 
 
 @pytest.mark.asyncio

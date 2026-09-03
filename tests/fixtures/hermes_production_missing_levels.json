@@ -1,0 +1,14 @@
+{
+  "object": "chat.completion",
+  "model": "hermes-agent",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"decisions\":[{\"symbol\":\"SOLUSDT\",\"action\":\"WAIT\",\"confidence\":86,\"reason\":\"Bearish 5m and 15m momentum conflicts with a neutral 1h structure; price is near support without confirmed reversal or breakdown.\"},{\"symbol\":\"XRPUSDT\",\"action\":\"WAIT\",\"confidence\":84,\"reason\":\"The 1h trend remains mildly constructive, but 5m and 15m momentum is bearish and price is near support, making either direction poorly confirmed.\"},{\"symbol\":\"ADAUSDT\",\"action\":\"WAIT\",\"confidence\":80,\"reason\":\"The 1h trend is bullish, but 15m momentum has weakened and 5m indicators are neutral; no confirmed continuation or reversal entry.\"},{\"symbol\":\"LINKUSDT\",\"action\":\"WAIT\",\"confidence\":85,\"reason\":\"Price is below short-term averages with bearish 5m momentum, while the 1h structure is neutral; downside is not sufficiently confirmed near support.\"},{\"symbol\":\"AVAXUSDT\",\"action\":\"WAIT\",\"confidence\":82,\"reason\":\"The 1h structure is bullish, but 5m momentum is bearish and 15m momentum is fading; timeframe alignment is insufficient.\"},{\"symbol\":\"SUIUSDT\",\"action\":\"WAIT\",\"confidence\":81,\"reason\":\"The 1h uptrend remains intact, but 15m momentum is bearish and recent price action is pulling back without a confirmed support reversal.\"}]}"
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

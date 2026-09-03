@@ -1,0 +1,14 @@
+{
+  "object": "chat.completion",
+  "model": "hermes-agent",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"decisions\":[{\"symbol\":\"SOLUSDT\",\"action\":\"WAIT\",\"confidence\":84,\"stop_loss\":null,\"take_profit\":null,\"reason\":\"5m and 15m momentum remain bearish below key short-term EMAs, but price is near lower Bollinger support around 99.90 while the 1h trend is mixed. Shorting support or buying without reversal confirmation is not defensible.\"},{\"symbol\":\"XRPUSDT\",\"action\":\"WAIT\",\"confidence\":82,\"stop_loss\":null,\"take_profit\":null,\"reason\":\"The 5m and 15m structures are weak with negative momentum, while the 1h remains above its base EMAs and MACD is positive. Conflicting timeframes and nearby support around 1.3590 provide no clean directional edge.\"},{\"symbol\":\"ADAUSDT\",\"action\":\"WAIT\",\"confidence\":78,\"stop_loss\":null,\"take_profit\":null,\"reason\":\"The 1h trend remains bullish above rising EMAs, but 15m momentum has weakened and 5m signals are neutral with low relative volume. A confirmed hold above 0.2072 or reversal from 0.2055 is needed.\"},{\"symbol\":\"LINKUSDT\",\"action\":\"WAIT\",\"confidence\":85,\"stop_loss\":null,\"take_profit\":null,\"reason\":\"Price is caught between weak 5m/15m momentum and a neutral 1h structure. Extremely low recent 5m relative volume and resistance near 11.20-11.23 make the current rebound unreliable.\"},{\"symbol\":\"AVAXUSDT\",\"action\":\"WAIT\",\"confidence\":80,\"stop_loss\":null,\"take_profit\":null,\"reason\":\"The 1h trend is mildly bullish, but 5m and 15m momentum remain bearish after rejection from 7.34. Current price is near support rather than a confirmed breakdown, so neither continuation long nor short has sufficient confirmation.\"},{\"symbol\":\"SUIUSDT\",\"action\":\"WAIT\",\"confidence\":83,\"stop_loss\":null,\"take_profit\":null,\"reason\":\"The broader 1h uptrend conflicts with bearish 5m and 15m momentum. Price is testing the 15m lower Bollinger area near 0.7601, making a fresh short poorly located, while no bullish reversal is confirmed.\"},{\"symbol\":\"NEARUSDT\",\"action\":\"WAIT\",\"confidence\":81,\"stop_loss\":null,\"take_profit\":null,\"reason\":\"A short-term rebound has lifted price toward clustered EMAs, but the 15m and 1h structures remain weak and volume on the rebound is low. The market lacks either breakout confirmation or a clean rejection setup.\"},{\"symbol\":\"DOGEUSDT\",\"action\":\"WAIT\",\"confidence\":82,\"stop_loss\":null,\"take_profit\":null,\"reason\":\"The 1h structure is mildly bullish, but 5m and 15m momentum are flat to bearish near the middle of their ranges. Low recent volume and nearby resistance around 0.0830-0.0833 leave insufficient reward-to-risk.\"}]}"
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}
