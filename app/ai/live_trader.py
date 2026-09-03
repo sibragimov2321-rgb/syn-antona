@@ -37,6 +37,8 @@ from app.trading.controlled_live import (
     ManualExecutionPreview,
 )
 from app.trading.live_costs import (
+    MINIMUM_NET_RR,
+    EXPECTED_MOVE_COST_BUFFER,
     estimate_live_costs,
     require_cost_aware_edge,
     validate_taker_fee_rate,
@@ -162,7 +164,9 @@ class AIMarketDataReader:
 
     @classmethod
     def from_environment(cls) -> AIMarketDataReader:
-        return cls(BybitMultiSymbolReadOnlyReader.from_environment())
+        return cls(BybitMultiSymbolReadOnlyReader.from_environment(
+            maximum_actual_minimum_notional=AI_POSITION_NOTIONAL,
+        ))
 
     async def read(self, now: datetime | None = None) -> AIMarketSnapshot:
         current = now or datetime.now(UTC)
@@ -553,10 +557,13 @@ class AILiveRepository:
             )
 
 
-def build_ai_prompt(market: AIMarketSnapshot) -> tuple[str, str]:
+def build_ai_prompt(
+    market: AIMarketSnapshot, fee_rates: dict[str, BybitFeeRateSnapshot] | None = None,
+) -> tuple[str, str]:
     symbols: list[dict[str, Any]] = []
     for symbol in SCANNER_CONFIG.symbols:
         instrument = market.scanner.instruments[symbol]
+        fee = (fee_rates or {}).get(symbol)
         frames = {
             timeframe: _frame_payload(rows)
             for timeframe, rows in market.candles[symbol].items()
@@ -568,6 +575,14 @@ def build_ai_prompt(market: AIMarketSnapshot) -> tuple[str, str]:
                 "ask": str(instrument.ask),
                 "spread_pct": str(instrument.spread_pct),
                 "turnover_24h": str(instrument.turnover_24h),
+                "instrument_enabled": instrument.enabled,
+                "instrument_exclusion_reason": instrument.exclusion_reason,
+                "tick_size": str(instrument.tick_size),
+                "quantity_step": str(instrument.quantity_step),
+                "minimum_quantity": str(instrument.minimum_quantity),
+                "minimum_notional": str(instrument.minimum_notional),
+                "taker_fee_rate": str(fee.taker_fee_rate) if fee else None,
+                "fee_verified_at": fee.verified_at.isoformat() if fee else None,
                 "timeframes": frames,
             }
         )
@@ -575,7 +590,15 @@ def build_ai_prompt(market: AIMarketSnapshot) -> tuple[str, str]:
         "task": (
             "Compare every symbol and return exactly one LONG, SHORT, or WAIT decision "
             "per symbol. Confidence is 0-100. LONG/SHORT must include concrete stop_loss "
-            "and take_profit around the fresh bid/ask. Do not invent symbols."
+            "and take_profit around the fresh bid/ask. Do not invent symbols. "
+            "Use technically defensible SL/TP from the supplied structure, never arbitrary "
+            "levels stretched just to pass a gate. Before proposing LONG/SHORT, estimate "
+            "NET reward/risk using the cost formula below, not gross R/R alone. Gross "
+            "reward must leave enough headroom for entry AND exit taker fees, spread and "
+            "slippage so NET R/R remains >= 1.5. If no defensible levels satisfy these "
+            "conditions, fees are missing, or the instrument is disabled, return WAIT "
+            "with null levels. The deterministic Risk Manager independently recalculates "
+            "from a fresh quote and has the final veto; AI cannot waive any gate."
         ),
         "constraints": {
             "confidence_threshold": AI_CONFIDENCE_THRESHOLD,
@@ -583,6 +606,21 @@ def build_ai_prompt(market: AIMarketSnapshot) -> tuple[str, str]:
             "leverage": str(AI_LEVERAGE),
             "maximum_open_positions": AI_MAX_POSITIONS,
             "closed_candles_only": True,
+            "minimum_net_rr": str(MINIMUM_NET_RR),
+            "expected_move_cost_buffer": str(EXPECTED_MOVE_COST_BUFFER),
+            "slippage_per_leg": str(CONTROLLED_LIVE_V1.estimated_slippage_per_leg),
+            "min_level_distance_pct": str(MIN_LEVEL_DISTANCE_PCT),
+            "max_level_distance_pct": str(MAX_LEVEL_DISTANCE_PCT),
+        },
+        "cost_formula_per_unit": {
+            "entry": "ask for LONG, bid for SHORT; f=taker_fee_rate, s=slippage_per_leg",
+            "gross_reward": "TP-entry for LONG; entry-TP for SHORT",
+            "gross_risk": "entry-SL for LONG; SL-entry for SHORT",
+            "target_cost": "(entry+TP)*(f+s)+(ask-bid)",
+            "stop_cost": "(entry+SL)*(f+s)+(ask-bid)",
+            "net_rr": "(gross_reward-target_cost)/(gross_risk+stop_cost) >= minimum_net_rr",
+            "move_gate": "gross_reward >= expected_move_cost_buffer*target_cost",
+            "gross_rr_headroom": "gross_reward >= minimum_net_rr*(gross_risk+stop_cost)+target_cost",
         },
         "account": {
             "equity": str(market.scanner.account.equity),
@@ -1023,12 +1061,14 @@ class AIAutonomousTrader:
             return {"status": "ALREADY_SCANNED", "scheduled_at": scheduled.isoformat()}
         try:
             market = await self.market_reader.read(current)
-            prompt, request_hash = build_ai_prompt(market)
-            raw = await self.provider.complete_json(prompt, AIBatchDecision)
+            fee_rates = await self._fee_rates(current)
+            prompt, request_hash = build_ai_prompt(market, fee_rates)
+            raw = await self.provider.complete_json(
+                prompt, AIBatchDecision, expected_symbols=frozenset(SCANNER_CONFIG.symbols),
+            )
             result = AIBatchDecision.model_validate(raw)
             if {item.symbol for item in result.decisions} != set(SCANNER_CONFIG.symbols):
                 raise ValueError("AI must return exactly one decision for every symbol")
-            fee_rates = await self._fee_rates(current)
             recent_closes = await self.market_reader.recent_closes()
             next_scan = scheduled + timedelta(seconds=self.settings.ai_scan_interval_seconds)
             self.repository.complete_scan(scan_id, request_hash, result, market, next_scan)

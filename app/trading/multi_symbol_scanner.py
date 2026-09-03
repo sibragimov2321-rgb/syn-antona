@@ -140,16 +140,23 @@ class ScannerReadSnapshot:
 class BybitMultiSymbolReadOnlyReader:
     """GET-only Mainnet reader; its transport has no mutation allowlist."""
 
-    def __init__(self, client: BybitMainnetReadOnlyClient) -> None:
+    def __init__(
+        self, client: BybitMainnetReadOnlyClient, *,
+        maximum_actual_minimum_notional: Decimal = SCANNER_CONFIG.maximum_actual_minimum_notional,
+    ) -> None:
         self.client = client
+        self.maximum_actual_minimum_notional = maximum_actual_minimum_notional
 
     @classmethod
-    def from_environment(cls) -> BybitMultiSymbolReadOnlyReader:
+    def from_environment(
+        cls, *, maximum_actual_minimum_notional: Decimal = SCANNER_CONFIG.maximum_actual_minimum_notional,
+    ) -> BybitMultiSymbolReadOnlyReader:
         return cls(
             BybitMainnetReadOnlyClient(
                 os.getenv("BYBIT_API_KEY", ""),
                 os.getenv("BYBIT_API_SECRET", ""),
-            )
+            ),
+            maximum_actual_minimum_notional=maximum_actual_minimum_notional,
         )
 
     async def read(self) -> ScannerReadSnapshot:
@@ -220,7 +227,10 @@ class BybitMultiSymbolReadOnlyReader:
             if not instrument or not ticker:
                 instruments[symbol] = _unavailable_instrument(symbol, now)
                 continue
-            instruments[symbol] = _parse_instrument(symbol, instrument, ticker, now)
+            instruments[symbol] = _parse_instrument(
+                symbol, instrument, ticker, now,
+                maximum_actual_minimum_notional=self.maximum_actual_minimum_notional,
+            )
 
         accounts = wallet.result.get("list") or []
         account = accounts[0] if accounts else {}
@@ -313,7 +323,8 @@ def _execution_time(item: dict[str, Any]) -> datetime | None:
 
 
 def _parse_instrument(
-    symbol: str, instrument: dict[str, Any], ticker: dict[str, Any], now: datetime
+    symbol: str, instrument: dict[str, Any], ticker: dict[str, Any], now: datetime, *,
+    maximum_actual_minimum_notional: Decimal = SCANNER_CONFIG.maximum_actual_minimum_notional,
 ) -> ScannerInstrument:
     lot = instrument.get("lotSizeFilter") or {}
     price_filter = instrument.get("priceFilter") or {}
@@ -340,9 +351,9 @@ def _parse_instrument(
         reasons.append("Linear Perpetual недоступен")
     if bid <= 0 or ask <= 0 or ask < bid or step <= 0:
         reasons.append("некорректные instrument/quote данные")
-    if actual_notional > SCANNER_CONFIG.maximum_actual_minimum_notional:
+    if actual_notional > maximum_actual_minimum_notional:
         reasons.append(
-            f"минимальный фактический ордер ${actual_notional} превышает $10"
+            f"минимальный фактический ордер ${actual_notional} превышает ${maximum_actual_minimum_notional}"
         )
     if turnover < SCANNER_CONFIG.minimum_turnover_24h:
         reasons.append(

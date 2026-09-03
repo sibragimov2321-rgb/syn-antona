@@ -191,11 +191,12 @@ async def test_bad_or_incomplete_batch_never_reaches_executor_or_ledger(monkeypa
             **kwargs,
         ),
     )
-    monkeypatch.setattr("app.ai.live_trader.build_ai_prompt", lambda market: ("fixture", "hash"))
+    monkeypatch.setattr("app.ai.live_trader.build_ai_prompt", lambda market, fees: ("fixture", "hash"))
     reader = AsyncMock()
     trader = AIAutonomousTrader(settings, sessions, OpenAICompatibleProvider(settings), reader,
                                AsyncMock(), AsyncMock())
     trader._execute_candidates = AsyncMock()
+    trader._fee_rates = AsyncMock(return_value={})
     result = await trader.cycle()
     assert result["status"] == "FAILED"
     trader._execute_candidates.assert_not_awaited()
@@ -205,3 +206,95 @@ async def test_bad_or_incomplete_batch_never_reaches_executor_or_ledger(monkeypa
         assert db.scalar(select(func.count()).select_from(ControlledLiveProposalRecord)) == 0
         assert db.scalar(select(AILiveScanRecord.status)) == "FAILED"
     engine.dispose()
+
+
+@pytest.mark.parametrize("fenced", [
+    '```json {json}```', '```{json}```', '~~~json\n{json}\n~~~',
+    '```JSON\r\n{json}\r\n```',
+])
+def test_markdown_wrapper_only_is_removed(fenced):
+    value = {"decisions": [decision()]}
+    content = fenced.replace("{json}", json.dumps(value))
+    assert parse_hermes_response(envelope(content), AIBatchDecision) == value
+
+
+def _full_batch():
+    return {"decisions": [decision() | {"symbol": symbol} for symbol in SCANNER_CONFIG.symbols]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [
+    "not json", '{"decisions":[]}',
+    json.dumps({"decisions": [decision("LONG") | {"stop_loss": None}]}),
+    json.dumps({"decisions": [decision() | {"confidence": 101}]}),
+    json.dumps({"decisions": [decision()]}),
+])
+async def test_invalid_schema_or_incomplete_universe_has_one_ai_only_retry(monkeypatch, bad):
+    requests = []
+    original_client = httpx.AsyncClient
+    valid = _full_batch()
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        content = bad if len(requests) == 1 else "```json\n" + json.dumps(valid) + "\n```"
+        return httpx.Response(200, json=envelope(content))
+
+    monkeypatch.setattr("app.ai.service.httpx.AsyncClient", lambda **kwargs: original_client(
+        transport=httpx.MockTransport(handler), **kwargs,
+    ))
+    settings = Settings(ai_api_key="fixture-key", ai_model="hermes-agent",
+                        ai_base_url="http://hermes.railway.internal:8642/v1")
+    result = await OpenAICompatibleProvider(settings).complete_json(
+        "original closed market data", AIBatchDecision,
+        expected_symbols=frozenset(SCANNER_CONFIG.symbols),
+    )
+    assert result == valid
+    assert len(requests) == 2
+    assert requests[1]["messages"][:-1] == requests[0]["messages"]
+    assert requests[1]["messages"][-1]["content"].startswith("RETURN VALID JSON ONLY")
+    assert "not json" not in requests[1]["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_second_invalid_response_is_no_order_without_third_request(monkeypatch):
+    requests = []
+    original_client = httpx.AsyncClient
+    invalid = _full_batch()
+    invalid["decisions"][0].update(action="LONG", stop_loss=None, take_profit=None)
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=envelope(json.dumps(invalid)))
+
+    monkeypatch.setattr("app.ai.service.httpx.AsyncClient", lambda **kwargs: original_client(
+        transport=httpx.MockTransport(handler), **kwargs,
+    ))
+    settings = Settings(ai_api_key="fixture-key", ai_model="hermes-agent",
+                        ai_base_url="http://hermes.railway.internal:8642/v1")
+    with pytest.raises(AIUnavailable, match="after one retry; NO ORDER"):
+        await OpenAICompatibleProvider(settings).complete_json(
+            "market", AIBatchDecision, expected_symbols=frozenset(SCANNER_CONFIG.symbols),
+        )
+    assert len(requests) == 2
+    assert invalid["decisions"][0]["stop_loss"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+async def test_non_schema_http_failures_do_not_trigger_schema_retry(monkeypatch, status):
+    requests = []
+    original_client = httpx.AsyncClient
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(status, json={"error": "private detail must not be logged"})
+
+    monkeypatch.setattr("app.ai.service.httpx.AsyncClient", lambda **kwargs: original_client(
+        transport=httpx.MockTransport(handler), **kwargs,
+    ))
+    settings = Settings(ai_api_key="fixture-key", ai_model="hermes-agent",
+                        ai_base_url="http://hermes.railway.internal:8642/v1")
+    with pytest.raises(AIUnavailable) as error:
+        await OpenAICompatibleProvider(settings).complete_json("market", AIBatchDecision)
+    assert "private detail" not in str(error.value)
+    assert len(requests) == 1

@@ -15,6 +15,7 @@ from app.domain.models import Decision, Signal
 
 class AIUnavailable(RuntimeError): pass
 class AIRateLimited(AIUnavailable): pass
+class AIInvalidResponse(AIUnavailable): pass
 
 
 class AIProvider:
@@ -82,7 +83,9 @@ def _hermes_prompt_content(prompt: str) -> str | list[dict[str, str]]:
         raise AIUnavailable("Hermes input cannot be transmitted without truncation") from error
 
 
-def parse_hermes_response(payload: object, schema: type[BaseModel]) -> dict:
+def parse_hermes_response(
+    payload: object, schema: type[BaseModel], *, expected_symbols: frozenset[str] | None = None,
+) -> dict:
     """Parse the observed Chat Completions envelope; never repair trading data."""
     try:
         if not isinstance(payload, dict):
@@ -94,9 +97,11 @@ def parse_hermes_response(payload: object, schema: type[BaseModel]) -> dict:
         if not isinstance(content, str):
             raise ValueError("Content must be text")
         content = content.strip()
-        fence = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", content, re.S | re.I)
+        # Remove a single complete outer Markdown fence only. Never extract a
+        # JSON-looking substring from prose or repair its trading values.
+        fence = re.fullmatch(r"(```|~~~)(?:json)?\s*(.*?)\s*\1", content, re.S | re.I)
         if fence:
-            content = fence.group(1)
+            content = fence.group(2)
         result = json.loads(
             content, object_pairs_hook=_unique_json_object,
             parse_constant=_reject_json_constant,
@@ -104,10 +109,14 @@ def parse_hermes_response(payload: object, schema: type[BaseModel]) -> dict:
         if not isinstance(result, dict):
             raise ValueError("JSON root must be an object")
         schema.model_validate(result)
+        if expected_symbols is not None and (
+            {item["symbol"] for item in result["decisions"]} != expected_symbols
+        ):
+            raise ValueError("Incomplete requested symbol universe")
         # Validation is a gate, not a repair: return the original parsed values.
         return result
     except (KeyError, IndexError, TypeError, AttributeError, ValueError) as error:
-        raise AIUnavailable("Hermes response does not match the required JSON schema") from error
+        raise AIInvalidResponse("Hermes response does not match the required JSON schema") from error
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -116,7 +125,10 @@ class OpenAICompatibleProvider(AIProvider):
     async def complete(self, prompt: str, schema: type[AIResult]) -> dict:
         return await self.complete_json(prompt, schema)
 
-    async def complete_json(self, prompt: str, schema: type[BaseModel]) -> dict:
+    async def complete_json(
+        self, prompt: str, schema: type[BaseModel], *,
+        expected_symbols: frozenset[str] | None = None,
+    ) -> dict:
         if not self.settings.ai_api_key: raise AIUnavailable("AI API key is not configured")
         base = (self.settings.ai_base_url or (
             "https://api.openai.com/v1"
@@ -182,15 +194,34 @@ class OpenAICompatibleProvider(AIProvider):
             async with httpx.AsyncClient(
                 timeout=self.settings.ai_timeout, follow_redirects=False
             ) as client:
-                response = await client.post(f"{base}/chat/completions", headers=headers, json=body)
-            if response.status_code == 429: raise AIRateLimited("AI rate limited")
-            response.raise_for_status()
-            if private_hermes:
-                return parse_hermes_response(response.json(), schema)
-            content = response.json()["choices"][0]["message"]["content"]
-            if not isinstance(content, str):
-                raise ValueError("AI response content is not a JSON string")
-            return json.loads(content)
+                # One bounded *AI-only* retry for invalid Hermes output. HTTP,
+                # authentication, rate-limit and timeout failures are not retried.
+                for attempt in range(2 if private_hermes else 1):
+                    response = await client.post(f"{base}/chat/completions", headers=headers, json=body)
+                    if response.status_code == 429: raise AIRateLimited("AI rate limited")
+                    response.raise_for_status()
+                    if not private_hermes:
+                        content = response.json()["choices"][0]["message"]["content"]
+                        if not isinstance(content, str):
+                            raise ValueError("AI response content is not a JSON string")
+                        return json.loads(content)
+                    try:
+                        return parse_hermes_response(
+                            response.json(), schema, expected_symbols=expected_symbols,
+                        )
+                    except (AIInvalidResponse, ValueError) as error:
+                        if attempt == 1:
+                            raise AIInvalidResponse(
+                                "Hermes JSON/schema invalid after one retry; NO ORDER"
+                            ) from error
+                        # Do not echo the invalid response or infer missing levels.
+                        # Retain the same original market data and full schema.
+                        body["messages"].append({
+                            "role": "user",
+                            "content": "RETURN VALID JSON ONLY. Match the supplied schema for every "
+                                       "requested symbol. Include all required fields; WAIT levels "
+                                       "must be null. Never invent missing trading values.",
+                        })
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             reason = {

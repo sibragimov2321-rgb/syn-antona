@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+import json
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -15,6 +16,8 @@ from app.ai.live_trader import (
     AIDecision,
     AILiveRepository,
     AIMarketSnapshot,
+    AIMarketDataReader,
+    BybitFeeRateSnapshot,
     RecentClosedPosition,
     ClosedCandle,
     build_ai_preview,
@@ -45,6 +48,7 @@ from app.trading.multi_symbol_scanner import (
     ScannerAccount,
     ScannerInstrument,
     ScannerReadSnapshot,
+    _parse_instrument,
 )
 
 
@@ -298,6 +302,79 @@ def test_prompt_contains_every_symbol_and_closed_indicators() -> None:
         assert symbol in prompt
     assert '"rsi_14"' in prompt
     assert '"macd_signal"' in prompt
+
+
+def test_prompt_uses_verified_real_fees_and_unchanged_net_cost_formula():
+    market = _market()
+    rates = {symbol: BybitFeeRateSnapshot(
+        symbol, Decimal("0.0004"), Decimal("0.001"), market.fetched_at,
+    ) for symbol in SCANNER_CONFIG.symbols}
+    prompt, _ = build_ai_prompt(market, rates)
+    data = json.loads(prompt)
+    assert data["constraints"]["minimum_net_rr"] == "1.5"
+    assert data["constraints"]["confidence_threshold"] == 75
+    assert data["constraints"]["leverage"] == "10"
+    assert data["constraints"]["position_notional_usdt"] == "15"
+    assert data["constraints"]["maximum_open_positions"] == 3
+    assert data["constraints"]["slippage_per_leg"] == str(CONTROLLED_LIVE_V1.estimated_slippage_per_leg)
+    assert data["cost_formula_per_unit"]["target_cost"] == "(entry+TP)*(f+s)+(ask-bid)"
+    assert data["cost_formula_per_unit"]["stop_cost"] == "(entry+SL)*(f+s)+(ask-bid)"
+    assert "return WAIT" in data["task"]
+    for item in data["symbols"]:
+        assert item["taker_fee_rate"] == "0.001"
+        assert item["fee_verified_at"] == market.fetched_at.isoformat()
+        assert item["tick_size"] == str(market.scanner.instruments[item["symbol"]].tick_size)
+
+
+def _sol_limits(*, price="101.48", cap=None, turnover="100000000", min_notional="5"):
+    metadata = {
+        "status": "Trading", "contractType": "LinearPerpetual",
+        "lotSizeFilter": {"minOrderQty": "0.1", "qtyStep": "0.1", "minNotionalValue": min_notional},
+        "priceFilter": {"tickSize": "0.01"}, "leverageFilter": {"maxLeverage": "50"},
+    }
+    ticker = {"bid1Price": str(Decimal(price)-Decimal("0.01")), "ask1Price": price,
+              "turnover24h": turnover}
+    kwargs = {} if cap is None else {"maximum_actual_minimum_notional": cap}
+    return _parse_instrument("SOLUSDT", metadata, ticker, datetime.now(UTC), **kwargs)
+
+
+@pytest.mark.parametrize("direction,stop,target", [("LONG", 99, 107), ("SHORT", 104, 95)])
+def test_sol_minimum_10148_passes_ai_15_cap_and_quantity_rounding(direction, stop, target):
+    old = _sol_limits()
+    assert not old.enabled  # The independent archived/frozen path is unchanged.
+    instrument = _sol_limits(cap=AI_POSITION_NOTIONAL)
+    assert instrument.enabled
+    assert instrument.actual_minimum_notional == Decimal("10.148")
+    decision = AIDecision(symbol="SOLUSDT", action=direction, confidence=80,
+                          stop_loss=stop, take_profit=target, reason="fixture")
+    preview = build_ai_preview("sol-15", decision, instrument, Decimal("0.001"))
+    assert preview.quantity == Decimal("0.1")
+    assert preview.quantity % instrument.quantity_step == 0
+    assert preview.expected_notional <= Decimal("15")
+    assert preview.risk_reward_ratio >= Decimal("1.5")
+    assert preview.leverage == Decimal("10")
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"price": "151"}, {"turnover": "1"}, {"min_notional": "16"},
+])
+def test_ai_15_cap_does_not_bypass_exchange_limits_or_liquidity(kwargs):
+    instrument = _sol_limits(cap=AI_POSITION_NOTIONAL, **kwargs)
+    assert not instrument.enabled
+    decision = AIDecision(symbol="SOLUSDT", action="LONG", confidence=80,
+                          stop_loss=99, take_profit=107, reason="fixture")
+    with pytest.raises(ControlledLiveBlocked):
+        build_ai_preview("sol-reject", decision, instrument, Decimal("0.001"))
+
+
+def test_production_ai_reader_passes_15_cap_to_shared_reader(monkeypatch):
+    from app.trading.multi_symbol_scanner import BybitMultiSymbolReadOnlyReader
+    from unittest.mock import Mock
+    factory = Mock()
+    monkeypatch.setattr(BybitMultiSymbolReadOnlyReader, "from_environment", factory)
+    reader = AIMarketDataReader.from_environment()
+    factory.assert_called_once_with(maximum_actual_minimum_notional=Decimal("15"))
+    assert reader.reader is factory.return_value
 
 
 class _Gateway:
