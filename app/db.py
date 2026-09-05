@@ -818,5 +818,69 @@ class ShadowSystemEventRecord(Base):
     )
 
 
+class PositionProfitStateRecord(Base):
+    """Durable high-water mark and confirmed native protection per real entry."""
+
+    __tablename__ = "position_profit_states"
+
+    entry_client_order_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    position_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    initial_stop_loss: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    initial_take_profit: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    initial_risk_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    entry_fee_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    estimated_exit_cost_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    current_price: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    current_net_pnl: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    max_favorable_price: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    max_favorable_excursion_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(24, 10), nullable=False
+    )
+    max_favorable_r: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    confirmed_stop_loss: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    stage: Mapped[str] = mapped_column(String(24), nullable=False, default="INITIAL")
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+class PositionProtectionEventRecord(Base):
+    """Idempotent audit row for each requested and confirmed risk reduction."""
+
+    __tablename__ = "position_protection_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "entry_client_order_id", "action", "requested_stop_loss",
+            name="uq_position_protection_action_stop",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entry_client_order_id: Mapped[str] = mapped_column(
+        ForeignKey("position_profit_states.entry_client_order_id"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    requested_stop_loss: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
+    preserved_take_profit: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 engine = create_engine(get_settings().database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)

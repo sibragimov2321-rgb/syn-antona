@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     ai_required: bool = True
     ai_max_requests_per_hour: int = 60
     ai_max_requests_per_day: int = 500
+    # Local, deterministic management of existing real positions.  This is
+    # independent from the AI scanner and is opt-in so an old deployment keeps
+    # exactly its previous behaviour until the migration has been applied.
+    position_profit_protector_enabled: bool = False
     shadow_quote_stale_seconds: int = 30
     shadow_live_candle_grace_seconds: int = 180
     shadow_offline_after_failures: int = 3

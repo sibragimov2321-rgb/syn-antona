@@ -10,7 +10,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db import Base, ControlledLiveStateRecord, ExecutionOrderRecord
+from app.db import (
+    Base,
+    ControlledLiveProposalRecord,
+    ControlledLiveStateRecord,
+    ExecutionOrderRecord,
+)
 from app.exchanges.bybit_balance import derivatives_available_balance
 from app.exchanges.bybit_v5_gateway import (
     BybitOrderRejected,
@@ -68,6 +73,8 @@ class MockBybitVenue:
         self.pending_order = pending_order
         self.client_id = "clv1-existing"
         self.side = "Buy"
+        self.stop_loss = "89"
+        self.take_profit = "92"
         self.posts = []
         self.cancelled = False
 
@@ -83,6 +90,8 @@ class MockBybitVenue:
             if path == "/v5/position/trading-stop":
                 if self.protection_failure:
                     return _error(10001, "protection rejected")
+                self.stop_loss = payload["stopLoss"]
+                self.take_profit = payload["takeProfit"]
                 return _ok({})
             if path == "/v5/order/cancel":
                 self.cancelled = True
@@ -159,6 +168,8 @@ class MockBybitVenue:
                             "cumExecQty": self.fill_quantity,
                             "avgPrice": "90",
                             "positionIdx": 0,
+                            "stopLoss": self.stop_loss,
+                            "takeProfit": self.take_profit,
                         }
                     ]
                 }
@@ -214,6 +225,8 @@ class MockBybitVenue:
                             "size": self.fill_quantity,
                             "avgPrice": "90",
                             "positionIdx": 0,
+                            "stopLoss": self.stop_loss,
+                            "takeProfit": self.take_profit,
                         }
                     ]
                     if self.open_position
@@ -399,6 +412,52 @@ async def test_exchange_native_tp_sl_success():
 
 
 @pytest.mark.asyncio
+async def test_profit_protector_tightens_sl_preserves_tp_and_verifies():
+    venue = MockBybitVenue(existing_duplicate=True)
+    gateway, _ = _gateway(venue)
+    await gateway.manage_native_protection(
+        symbol="SOLUSDT",
+        stop_loss=Decimal("90.20"),
+        client_order_id="clv1-existing",
+    )
+    payload = next(
+        payload for path, payload in venue.posts if path == "/v5/position/trading-stop"
+    )
+    assert payload["stopLoss"] == "90.20"
+    assert payload["takeProfit"] == "92"
+    assert venue.stop_loss == "90.20"
+    with pytest.raises(ControlledLiveBlocked, match="only move toward profit"):
+        await gateway.manage_native_protection(
+            symbol="SOLUSDT",
+            stop_loss=Decimal("89.50"),
+            client_order_id="clv1-existing",
+        )
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_early_profit_exit_is_reduce_only_and_idempotent():
+    venue = MockBybitVenue()
+    venue.open_position = True
+    gateway, _ = _gateway(venue)
+    result = await gateway.protective_reduce_only_close(
+        symbol="SOLUSDT", quantity=Decimal("0.1"), client_order_id="clv1-existing"
+    )
+    assert result["orderId"] == "close-1"
+    payload = next(
+        payload
+        for path, payload in venue.posts
+        if path == "/v5/order/create" and payload.get("reduceOnly")
+    )
+    assert payload["closeOnTrigger"] is True
+    assert payload["orderLinkId"].startswith("clv1-profi-")
+    assert await gateway.protective_reduce_only_close(
+        symbol="SOLUSDT", quantity=Decimal("0.1"), client_order_id="clv1-existing"
+    ) == {"alreadyClosed": True}
+    await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_tp_sl_failure_emergency_closes_reduce_only():
     venue = MockBybitVenue(protection_failure=True)
     gateway, _ = _gateway(venue)
@@ -543,6 +602,45 @@ async def test_production_guard_blocks_before_any_http_when_gates_false(tmp_path
         )
     assert calls == []
     await http.close()
+
+
+@pytest.mark.asyncio
+async def test_position_management_uses_durable_ownership_not_expired_entry_ttl(monkeypatch):
+    _, sessions, _, preview = _preview()
+    _armed_environment(monkeypatch)
+    monkeypatch.setenv("POSITION_PROFIT_PROTECTOR_ENABLED", "true")
+    get_settings.cache_clear()
+    with sessions.begin() as session:
+        proposal = session.get(ControlledLiveProposalRecord, preview.proposal_id)
+        proposal.status = "PROTECTED"
+        proposal.approved_at = datetime.now(UTC) - timedelta(days=2)
+        session.add(
+            ExecutionOrderRecord(
+                exchange="bybit",
+                account_id="main",
+                client_order_id=preview.client_order_id,
+                symbol="SOLUSDT",
+                side="BUY",
+                quantity=Decimal("0.1"),
+                request_hash="a" * 64,
+                status="FILLED_PROTECTED",
+            )
+        )
+    snapshot = await ProductionMutationGuard(
+        sessions,
+        GuardHttp(
+            positions=[{
+                "symbol": "SOLUSDT", "size": "0.1", "side": "Buy",
+                "avgPrice": "90", "stopLoss": "89", "takeProfit": "92",
+            }]
+        ),
+    ).authorize_position_management(
+        symbol="SOLUSDT",
+        quantity=Decimal("0.1"),
+        client_order_id=preview.client_order_id,
+    )
+    assert snapshot.open_positions == 1
+    get_settings.cache_clear()
 
 
 def test_client_order_id_is_deterministic_and_bybit_compatible():

@@ -611,6 +611,97 @@ class ProductionMutationGuard:
                 raise ControlledLiveBlocked("Persistent admin proposal is missing")
             return json.loads(proposal.preview_json), proposal.proposal_hash
 
+    async def authorize_position_management(
+        self, *, symbol: str, quantity: Decimal, client_order_id: str
+    ) -> GuardSnapshot:
+        """Authorize only a risk-reducing mutation for an owned protected position.
+
+        Unlike an entry approval, position management must remain possible after
+        the ten-minute entry approval TTL.  Ownership, immutable hashes, ledger,
+        live position size and restricted API permissions are revalidated here.
+        """
+        settings = get_settings()
+        if not settings.position_profit_protector_enabled:
+            raise ControlledLiveBlocked("POSITION_PROFIT_PROTECTOR_ENABLED=false")
+        ArmingGates.from_environment().require_all(expected_symbol=symbol)
+        if os.getenv("DRY_RUN", "true").strip().lower() != "false":
+            raise DryRunBlocked("DRY_RUN=true blocks position management before transport")
+        if symbol not in ALLOWED_SYMBOLS or quantity <= 0:
+            raise ControlledLiveBlocked("Position management request is outside the allowlist")
+        with self._sessions() as session:
+            proposal = session.scalar(
+                select(ControlledLiveProposalRecord).where(
+                    ControlledLiveProposalRecord.client_order_id == client_order_id
+                )
+            )
+            ledger = session.scalar(
+                select(ExecutionOrderRecord).where(
+                    ExecutionOrderRecord.client_order_id == client_order_id,
+                    ExecutionOrderRecord.status == "FILLED_PROTECTED",
+                )
+            )
+            state = session.get(ControlledLiveStateRecord, CONTROLLED_LIVE_V1.name)
+            if proposal is None or ledger is None or state is None:
+                raise ControlledLiveBlocked("Owned protected position ledger is missing")
+            preview = json.loads(proposal.preview_json)
+            if proposal.status != "PROTECTED":
+                raise ControlledLiveBlocked("Position proposal is not PROTECTED")
+            if proposal.profile_hash != CONTROLLED_LIVE_V1.config_hash:
+                raise ControlledLiveBlocked("Controlled-live profile hash mismatch")
+            if proposal.selection_hash not in {
+                scanner_selection_hash(symbol),
+                *(
+                    (CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.selection_hash,)
+                    if symbol == CONTROLLED_LIVE_V1_FIRST_INSTRUMENT.symbol
+                    else ()
+                ),
+            }:
+                raise ControlledLiveBlocked("Controlled-live instrument hash mismatch")
+            if str(preview.get("symbol") or "") != symbol:
+                raise ControlledLiveBlocked("Position does not match the durable proposal")
+            if proposal.admin_telegram_id not in settings.admin_telegram_ids:
+                raise ControlledLiveBlocked("Position owner is not an active admin")
+
+        permissions = permission_summary(await self._http.private_get("/v5/user/query-api", {}))
+        if permissions["read"] != "YES" or permissions["trade"] != "YES":
+            raise ControlledLiveBlocked("Bybit API Read and Trade permissions are required")
+        if permissions["withdraw"] != "NO" or permissions["transfer"] != "NO":
+            raise ControlledLiveBlocked("Withdraw and Transfer permissions must be disabled")
+        position_result = await self._http.private_get(
+            "/v5/position/list", {"category": "linear", "symbol": symbol}
+        )
+        live = next(
+            (item for item in position_result.get("list") or [] if _decimal(item.get("size")) > 0),
+            None,
+        )
+        if live is None or quantity > _decimal(live.get("size")):
+            raise ControlledLiveBlocked("Live position is missing or smaller than requested")
+        approved_quantity = _decimal(preview.get("quantity"))
+        live_key = f"{symbol}:{int(live.get('positionIdx') or 0)}"
+        if quantity > approved_quantity or (
+            proposal.position_id and proposal.position_id != live_key
+        ):
+            raise ControlledLiveBlocked("Live position identity does not match the owned entry")
+        created_at_ms = int(live.get("createdTime") or 0)
+        completed_at = _aware(proposal.completed_at) or _aware(proposal.created_at)
+        if created_at_ms and completed_at is not None:
+            opened_at = datetime.fromtimestamp(created_at_ms / 1000, UTC)
+            if abs((opened_at - completed_at).total_seconds()) > 600:
+                raise ControlledLiveBlocked("Live position timestamp does not match the owned entry")
+        wallet = await self._http.private_get(
+            "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"}
+        )
+        accounts = wallet.get("list") or []
+        equity = _decimal(accounts[0].get("totalEquity")) if accounts else Decimal()
+        ticker_result = await self._http.public_get(
+            "/v5/market/tickers", {"category": "linear", "symbol": symbol}
+        )
+        ticker = (ticker_result.get("list") or [{}])[0]
+        ask = _decimal(ticker.get("ask1Price") or ticker.get("lastPrice"))
+        if ask <= 0:
+            raise ControlledLiveBlocked("Fresh quote is unavailable for position management")
+        return GuardSnapshot(ask, 1, equity, Decimal())
+
     async def _instrument_and_ticker(
         self, symbol: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -685,6 +776,50 @@ class BybitV5OrderGateway:
             _decimal(lot.get("qtyStep")),
             _decimal(lot.get("minNotionalValue")),
         )
+
+    async def read_open_positions(self) -> list[dict[str, Any]]:
+        result = await self._http.private_get(
+            "/v5/position/list", {"category": "linear", "settleCoin": "USDT"}
+        )
+        return [
+            item
+            for item in result.get("list") or []
+            if _decimal(item.get("size")) > 0 and item.get("symbol") in ALLOWED_SYMBOLS
+        ]
+
+    async def read_ticker_details(self, symbol: str) -> dict[str, Any]:
+        self._require_symbol(symbol)
+        instruments, tickers = await asyncio.gather(
+            self._http.public_get(
+                "/v5/market/instruments-info", {"category": "linear", "symbol": symbol}
+            ),
+            self._http.public_get(
+                "/v5/market/tickers", {"category": "linear", "symbol": symbol}
+            ),
+        )
+        instrument = (instruments.get("list") or [None])[0]
+        ticker = (tickers.get("list") or [None])[0]
+        if not instrument or not ticker:
+            raise BybitGatewayError(f"{symbol} ticker metadata is unavailable")
+        return dict(ticker) | {"tickSize": (instrument.get("priceFilter") or {}).get("tickSize")}
+
+    async def read_closed_klines(
+        self, symbol: str, *, interval: str = "5", limit: int = 40
+    ) -> list[list[Any]]:
+        self._require_symbol(symbol)
+        result = await self._http.public_get(
+            "/v5/market/kline",
+            {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit},
+        )
+        now_ms = int(time.time() * 1000)
+        interval_ms = int(interval) * 60_000
+        return [row for row in result.get("list") or [] if int(row[0]) + interval_ms <= now_ms]
+
+    async def account_taker_fee_rate(self, symbol: str) -> Decimal:
+        self._require_symbol(symbol)
+        if not isinstance(self._authorizer, ProductionMutationGuard):
+            return BYBIT_TAKER_FEE_RATE
+        return await self._authorizer._account_taker_fee_rate(symbol)
 
     async def controlled_proposal_snapshot(
         self, symbol: str = ALLOWED_SYMBOL
@@ -1051,6 +1186,83 @@ class BybitV5OrderGateway:
             client_order_id=client_order_id,
             risk_reducing=True,
         )
+
+    async def manage_native_protection(
+        self, *, symbol: str, stop_loss: Decimal, client_order_id: str
+    ) -> None:
+        """Atomically tighten native SL while preserving the live native TP."""
+        position = await self.read_position(symbol)
+        if position is None:
+            raise ControlledLiveBlocked("Position disappeared before protection update")
+        quantity = _decimal(position.get("size"))
+        current_stop = _decimal(position.get("stopLoss"))
+        take_profit = _decimal(position.get("takeProfit"))
+        side = str(position.get("side") or "")
+        if min(quantity, current_stop, take_profit, stop_loss) <= 0:
+            raise ControlledLiveBlocked("Existing full native SL/TP is required")
+        if (side == "Buy" and stop_loss <= current_stop) or (
+            side == "Sell" and stop_loss >= current_stop
+        ):
+            raise ControlledLiveBlocked("Protective SL may only move toward profit")
+        if not isinstance(self._authorizer, ProductionMutationGuard):
+            await self._authorizer.authorize(
+                action="PROFIT_PROTECTION", symbol=symbol, quantity=quantity,
+                client_order_id=client_order_id, risk_reducing=True,
+            )
+        else:
+            await self._authorizer.authorize_position_management(
+                symbol=symbol, quantity=quantity, client_order_id=client_order_id
+            )
+        payload = {
+            "category": "linear",
+            "symbol": symbol,
+            "tpslMode": "Full",
+            "positionIdx": int(position.get("positionIdx") or 0),
+            "takeProfit": _number(take_profit),
+            "stopLoss": _number(stop_loss),
+            "tpOrderType": "Market",
+            "slOrderType": "Market",
+        }
+        mutation, _, _ = self._http.sign_post("/v5/position/trading-stop", payload)
+        if self.dry_run:
+            self.last_dry_run = mutation
+            raise DryRunBlocked("DRY_RUN blocked position management before transport")
+        await self._http.post_signed("/v5/position/trading-stop", payload)
+        if not await self.verify_native_protection(symbol, stop_loss, take_profit):
+            raise OrderOutcomeUnknown("Native SL update was not confirmed; do not retry automatically")
+
+    async def protective_reduce_only_close(
+        self, *, symbol: str, quantity: Decimal, client_order_id: str
+    ) -> dict[str, Any]:
+        """One idempotent local profit exit; timeout remains UNKNOWN."""
+        position = await self.read_position(symbol)
+        if position is None:
+            return {"alreadyClosed": True}
+        if not isinstance(self._authorizer, ProductionMutationGuard):
+            await self._authorizer.authorize(
+                action="PROFIT_EXIT", symbol=symbol, quantity=quantity,
+                client_order_id=client_order_id, risk_reducing=True,
+            )
+        else:
+            await self._authorizer.authorize_position_management(
+                symbol=symbol, quantity=quantity, client_order_id=client_order_id
+            )
+        close_link = _derived_link_id(client_order_id, "profit")
+        existing = await self.query_order(client_order_id=close_link, symbol=symbol)
+        if existing is not None:
+            return existing
+        payload = {
+            "category": "linear", "symbol": symbol,
+            "side": "Sell" if str(position.get("side")) == "Buy" else "Buy",
+            "orderType": "Market", "qty": _number(quantity), "timeInForce": "IOC",
+            "positionIdx": int(position.get("positionIdx") or 0),
+            "reduceOnly": True, "closeOnTrigger": True, "orderLinkId": close_link,
+        }
+        mutation, _, _ = self._http.sign_post("/v5/order/create", payload)
+        if self.dry_run:
+            self.last_dry_run = mutation
+            raise DryRunBlocked("DRY_RUN blocked protective exit before transport")
+        return await self._http.post_signed("/v5/order/create", payload)
 
     async def emergency_close_reduce_only(self, fill: LiveFill, symbol: str) -> None:
         client_order_id = await self._client_id_for_order(fill.order_id)

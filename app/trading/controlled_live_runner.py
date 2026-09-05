@@ -38,6 +38,7 @@ from app.trading.multi_symbol_scanner import (
     MultiSymbolFirstProposalCoordinator,
     MultiSymbolScannerRepository,
 )
+from app.trading.profit_protector import LocalPositionProfitProtector
 
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,7 @@ async def run(poll_seconds: int = 60) -> None:
     gateway = None
     coordinator = None
     ai_trader = None
+    protector_task = None
     current_task = asyncio.current_task()
     loop = asyncio.get_running_loop()
     installed: list[signal.Signals] = []
@@ -129,6 +131,11 @@ async def run(poll_seconds: int = 60) -> None:
         if not os.getenv("BYBIT_API_KEY") or not os.getenv("BYBIT_API_SECRET"):
             raise RuntimeError("Bybit credentials are missing")
         gateway = BybitV5OrderGateway.from_environment(SessionLocal)
+        if settings.position_profit_protector_enabled:
+            protector_task = asyncio.create_task(
+                LocalPositionProfitProtector(SessionLocal, gateway, notifier).run(),
+                name="local-position-profit-protector",
+            )
         AILiveRepository(SessionLocal).initialize(settings)
         if settings.ai_trading_enabled:
             ai_trader = AIAutonomousTrader(
@@ -159,6 +166,9 @@ async def run(poll_seconds: int = 60) -> None:
                 "live_trading_enabled": settings.live_trading_enabled,
                 "controlled_live_enabled": settings.controlled_live_enabled,
                 "ai_trading_enabled": settings.ai_trading_enabled,
+                "position_profit_protector": (
+                    "ACTIVE" if settings.position_profit_protector_enabled else "OFF"
+                ),
                 "dry_run": settings.dry_run,
                 "real_order_execution_enabled": bool(
                     not settings.dry_run
@@ -231,6 +241,9 @@ async def run(poll_seconds: int = 60) -> None:
                 )
             await asyncio.sleep(poll_seconds)
     finally:
+        if protector_task is not None:
+            protector_task.cancel()
+            await asyncio.gather(protector_task, return_exceptions=True)
         try:
             _heartbeat(instance_id, "STOPPED")
         except Exception:

@@ -30,5 +30,6 @@ def test_docker_image_includes_immutable_controlled_live_profile():
 def test_watchdog_window_covers_long_multi_exchange_hourly_cycle():
     settings = Settings(_env_file=None)
     assert settings.shadow_execution_enabled is False
+    assert settings.position_profit_protector_enabled is False
     assert settings.shadow_lease_seconds == 900
     assert settings.shadow_heartbeat_max_age_seconds == 900

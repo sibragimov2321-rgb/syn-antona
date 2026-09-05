@@ -179,6 +179,33 @@ class ShadowNotifier:
             "Exchange-native SL/TP verified; execution recorded in PostgreSQL."
         )
 
+    async def profit_protection(
+        self,
+        action: str,
+        symbol: str,
+        stop_loss: Decimal | None,
+        net_pnl: Decimal,
+        current_r: Decimal,
+    ) -> bool:
+        titles = {
+            "BREAK_EVEN": "BREAK EVEN ACTIVATED",
+            "PROFIT_LOCK": "PROFIT PROTECTED",
+            "TRAILING_UPDATE": "TRAILING UPDATED",
+            "EARLY_PROFIT_EXIT": "EARLY PROFIT EXIT",
+        }
+        title = titles.get(action)
+        if title is None:
+            return False
+        stop = f"\nNative SL: {stop_loss}" if stop_loss is not None else ""
+        return await self._send(
+            f"🛡 <b>{title}</b>\n\n"
+            f"Symbol: {escape(symbol)}\n"
+            f"Net PnL: ${net_pnl:.4f}\n"
+            f"PnL/R: {current_r:.2f}R"
+            f"{stop}\n\n"
+            "Локальный монитор; дополнительных Hermes-запросов: 0."
+        )
+
     async def _send(self, text: str) -> bool:
         if not self.bot:
             return False
