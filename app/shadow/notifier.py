@@ -186,21 +186,29 @@ class ShadowNotifier:
         stop_loss: Decimal | None,
         net_pnl: Decimal,
         current_r: Decimal,
+        mfe_usdt: Decimal,
+        giveback_pct: Decimal,
     ) -> bool:
-        titles = {
-            "BREAK_EVEN": "BREAK EVEN ACTIVATED",
-            "PROFIT_LOCK": "PROFIT PROTECTED",
-            "TRAILING_UPDATE": "TRAILING UPDATED",
-            "EARLY_PROFIT_EXIT": "EARLY PROFIT EXIT",
+        presentation = {
+            "PROFIT_WATCH": ("👀", "PROFIT WATCH"),
+            "BREAK_EVEN": ("🛡", "BREAK EVEN ACTIVATED"),
+            "MFE_PROFIT_PROTECT": ("🛡", "PROFIT PROTECTED"),
+            "PROFIT_LOCK": ("🛡", "PROFIT PROTECTED"),
+            "TRAILING_UPDATE": ("🛡", "TRAILING UPDATED"),
+            "EARLY_PROFIT_EXIT": ("⚡", "EARLY EXIT"),
         }
-        title = titles.get(action)
-        if title is None:
+        item = presentation.get(action)
+        if item is None:
             return False
+        icon, title = item
         stop = f"\nNative SL: {stop_loss}" if stop_loss is not None else ""
         return await self._send(
-            f"🛡 <b>{title}</b>\n\n"
+            f"{icon} <b>{title}</b>\n\n"
             f"Symbol: {escape(symbol)}\n"
-            f"Net PnL: ${net_pnl:.4f}\n"
+            f"Current PnL: ${net_pnl:.4f}\n"
+            f"MFE: ${mfe_usdt:.4f}\n"
+            f"Giveback: {giveback_pct:.1f}%\n"
+            f"Action: {escape(action)}\n"
             f"PnL/R: {current_r:.2f}R"
             f"{stop}\n\n"
             "Локальный монитор; дополнительных Hermes-запросов: 0."

@@ -32,7 +32,12 @@ PUBLIC_LINEAR_WS = "wss://stream.bybit.com/v5/public/linear"
 BREAK_EVEN_R = Decimal("0.5")
 PROFIT_LOCK_R = Decimal("1")
 LOCKED_R = Decimal("0.3")
-REVERSAL_RETRACE_R = Decimal("0.5")
+PROFIT_WATCH_MIN_R = Decimal("0.20")
+PROFIT_WATCH_BUFFER_USDT = Decimal("0.02")
+MFE_PROTECT_GIVEBACK = Decimal("0.35")
+MFE_EARLY_EXIT_GIVEBACK = Decimal("0.50")
+MFE_LOCK_CURRENT_SHARE = Decimal("0.75")
+MFE_LOCK_PEAK_SHARE = Decimal("0.50")
 
 
 def D(value: Any) -> Decimal:
@@ -70,7 +75,9 @@ class ProtectionDecision:
     reason: str
     current_net_pnl: Decimal
     current_r: Decimal
+    max_favorable_excursion_usdt: Decimal
     max_favorable_r: Decimal
+    giveback_pct: Decimal
 
 
 class ProfitProtectionGateway(Protocol):
@@ -222,23 +229,56 @@ def evaluate_protection(
     mfe = max(previous_mfe, current)
     current_r = current / risk if risk > 0 else Decimal()
     mfe_r = mfe / risk if risk > 0 else Decimal()
+    giveback = (
+        min(Decimal("1"), max(Decimal(), (mfe - current) / mfe))
+        if mfe > 0
+        else Decimal()
+    )
+    giveback_pct = giveback * Decimal("100")
+    round_trip_cost = position.entry_fee_usdt + estimated_close_cost(
+        executable,
+        position.quantity,
+        position.taker_fee_rate,
+        slippage_per_leg,
+    )
+    meaningful_profit_floor = round_trip_cost + PROFIT_WATCH_BUFFER_USDT
+    watch_floor = max(risk * PROFIT_WATCH_MIN_R, meaningful_profit_floor)
     current_atr = atr(bars)
 
     if (
-        mfe_r >= PROFIT_LOCK_R
-        and mfe - current >= risk * REVERSAL_RETRACE_R
-        and current > 0
+        mfe >= watch_floor
+        and giveback >= MFE_EARLY_EXIT_GIVEBACK
+        and current >= meaningful_profit_floor
         and current_atr is not None
         and adverse_momentum_reversal(position.side, bars, current_atr)
     ):
         return ProtectionDecision(
-            "EARLY_PROFIT_EXIT", None, "MFE retracement with confirmed adverse 5m momentum", current, current_r, mfe_r
+            "EARLY_PROFIT_EXIT",
+            None,
+            "MFE giveback >=50% with confirmed adverse 5m momentum",
+            current,
+            current_r,
+            mfe,
+            mfe_r,
+            giveback_pct,
         )
 
     candidate: Decimal | None = None
     action = "NONE"
     reason = "Profit threshold not reached"
-    if current_r >= PROFIT_LOCK_R and current_atr is not None:
+    if (
+        mfe >= watch_floor
+        and giveback >= MFE_PROTECT_GIVEBACK
+        and current >= meaningful_profit_floor
+    ):
+        desired_profit = min(
+            current * MFE_LOCK_CURRENT_SHARE,
+            mfe * MFE_LOCK_PEAK_SHARE,
+        )
+        candidate = _stop_for_net_profit(position, desired_profit, slippage_per_leg)
+        action = "MFE_PROFIT_PROTECT"
+        reason = "MFE giveback >=35%; lock meaningful net profit"
+    elif current_r >= PROFIT_LOCK_R and current_atr is not None:
         locked = _stop_for_net_profit(position, risk * LOCKED_R, slippage_per_leg)
         volatility = current_atr / executable if executable > 0 else Decimal()
         multiplier = Decimal("2") if volatility >= Decimal("0.01") else Decimal("1.5")
@@ -251,9 +291,22 @@ def evaluate_protection(
         candidate = _stop_for_net_profit(position, Decimal(), slippage_per_leg)
         action = "BREAK_EVEN"
         reason = "net PnL reached +0.5R; stop covers confirmed/estimated costs"
+    elif stage == "INITIAL" and current >= watch_floor:
+        return ProtectionDecision(
+            "PROFIT_WATCH",
+            None,
+            "net PnL exceeds costs, safety buffer, and +0.20R",
+            current,
+            current_r,
+            mfe,
+            mfe_r,
+            giveback_pct,
+        )
 
     if candidate is None or not _tightens(position.side, candidate, confirmed_stop):
-        return ProtectionDecision("NONE", None, reason, current, current_r, mfe_r)
+        return ProtectionDecision(
+            "NONE", None, reason, current, current_r, mfe, mfe_r, giveback_pct
+        )
     # Never submit a stop already through the executable side of the market.
     ceiling = bid - position.tick_size if position.side == "Buy" else ask + position.tick_size
     if position.side == "Buy":
@@ -261,8 +314,19 @@ def evaluate_protection(
     else:
         candidate = max(candidate, ceiling)
     if not _tightens(position.side, candidate, confirmed_stop):
-        return ProtectionDecision("NONE", None, "Rounded stop does not tighten protection", current, current_r, mfe_r)
-    return ProtectionDecision(action, candidate, reason, current, current_r, mfe_r)
+        return ProtectionDecision(
+            "NONE",
+            None,
+            "Rounded stop does not tighten protection",
+            current,
+            current_r,
+            mfe,
+            mfe_r,
+            giveback_pct,
+        )
+    return ProtectionDecision(
+        action, candidate, reason, current, current_r, mfe, mfe_r, giveback_pct
+    )
 
 
 class PositionProfitRepository:
@@ -563,7 +627,9 @@ class LocalPositionProfitProtector:
         if event_id is None:
             return
         try:
-            if decision.action == "EARLY_PROFIT_EXIT":
+            if decision.action == "PROFIT_WATCH":
+                self.repository.finish_event(event_id, status="CONFIRMED")
+            elif decision.action == "EARLY_PROFIT_EXIT":
                 await self.gateway.protective_reduce_only_close(
                     symbol=symbol,
                     quantity=position.quantity,
@@ -586,6 +652,8 @@ class LocalPositionProfitProtector:
                 decision.stop_loss,
                 decision.current_net_pnl,
                 decision.current_r,
+                decision.max_favorable_excursion_usdt,
+                decision.giveback_pct,
             )
         except OrderOutcomeUnknown:
             self.repository.finish_event(event_id, status="UNKNOWN")

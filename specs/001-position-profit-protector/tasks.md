@@ -55,6 +55,15 @@
 - [x] T018 Review diff for entry/strategy/risk/Hermes changes, secrets, and unintended scope in the whole branch
 - [x] T019 Perform a read-only production readiness check while the protector flag remains disabled; do not deploy or send a real test order
 
+## Phase 7: Early MFE giveback protection amendment
+
+- [x] T020 Specify fixed cost-aware watch, 35% giveback protection, and 50% giveback-plus-momentum early-exit rules without changing entry behavior
+- [x] T021 Extend the pure decision result with MFE/giveback diagnostics and implement LONG/SHORT rules in `app/trading/profit_protector.py`
+- [x] T022 Persist and deduplicate notification-only `PROFIT WATCH` transitions using the existing event/state tables
+- [x] T023 Extend Telegram protection notifications with exact watch/protect/exit labels and current PnL/MFE/giveback/action
+- [x] T024 Add deterministic threshold, no-premature-exit, monotonic-stop, restart/idempotency, notifier, and zero-AI tests
+- [ ] T025 Run targeted tests, full suite, lint, migration-head check, and production startup/runtime verification; send zero real test orders
+
 ## Dependencies & Execution Order
 
 - T001-T004 establish configuration, persistence, migration, and failing tests.

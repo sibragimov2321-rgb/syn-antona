@@ -23,12 +23,12 @@ One durable row per bot-owned entry client order.
 | max_favorable_excursion_usdt | Best observed net PnL | Monotonically non-decreasing |
 | max_favorable_r | Best observed net PnL divided by initial risk | Monotonically non-decreasing |
 | confirmed_stop_loss | Tightest exchange-confirmed stop | Never loosens |
-| stage | INITIAL, BREAK_EVEN, PROFIT_LOCK, TRAILING, EXIT_PENDING, CLOSED, ERROR_UNKNOWN | Controlled transition |
+| stage | INITIAL, PROFIT_WATCH, MFE_PROFIT_PROTECT, BREAK_EVEN, PROFIT_LOCK, TRAILING_UPDATE, EARLY_PROFIT_EXIT, CLOSED, ERROR_UNKNOWN | Controlled transition |
 | opened_at / last_observed_at / updated_at / closed_at | Lifecycle timestamps | UTC |
 
 ### State transitions
 
-`INITIAL → BREAK_EVEN → PROFIT_LOCK → TRAILING → CLOSED`
+`INITIAL → PROFIT_WATCH → MFE_PROFIT_PROTECT|BREAK_EVEN → PROFIT_LOCK|TRAILING_UPDATE → CLOSED`
 
 `INITIAL|BREAK_EVEN|PROFIT_LOCK|TRAILING → EXIT_PENDING → CLOSED`
 
@@ -54,4 +54,3 @@ One durable idempotency row per proposed stop level or early close.
 - A protected execution ledger row and approved proposal own exactly one current `PositionProfitState` per entry.
 - A `PositionProfitState` has zero or more `PositionProtectionEvent` rows.
 - Existing proposal, execution, and position records remain unchanged.
-

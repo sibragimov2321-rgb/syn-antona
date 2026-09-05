@@ -18,6 +18,10 @@ Returned when data is stale/incomplete, ownership cannot be reconciled, threshol
 
 Contains symbol, exact tighter stop, unchanged take profit, position index, quantity bound, entry client order ID, and action label. It must pass the gateway as a risk-reducing request and be read back from Bybit before confirmation.
 
+### Profit watch
+
+Contains current net PnL, MFE, MFE giveback percentage, and action. It is notification-only, is persisted once per position, and must never call the exchange.
+
 ### Early profit exit
 
 Contains symbol, full current quantity, deterministic derived close ID, and the owning entry client order ID. It must be reduce-only, cannot increase or reverse the position, and must reconcile before confirmation.
@@ -28,6 +32,9 @@ Contains symbol, full current quantity, deterministic derived close ID, and the 
 - +1R profit-lock confirmation: `PROFIT PROTECTED`.
 - Subsequent tighter trailing confirmation: `TRAILING UPDATED`.
 - Reconciled early exit: `EARLY PROFIT EXIT`.
+- Cost-aware watch activation: `👀 PROFIT WATCH`.
+- MFE giveback stop confirmation: `🛡 PROFIT PROTECTED`.
+- MFE giveback early exit confirmation: `⚡ EARLY EXIT`.
 - No notification for routine observations, unchanged candidates, stale inputs, or unconfirmed mutations.
 
 ## Failure contract
@@ -36,4 +43,3 @@ Contains symbol, full current quantity, deterministic derived close ID, and the 
 - Timeout/ambiguous result: persist `UNKNOWN`; do not resubmit; reconcile live state before any further mutation.
 - Verification mismatch: persist `UNKNOWN`; do not claim protection.
 - Connection loss: reconnect with bounded backoff; do not act on cached stale prices.
-

@@ -27,6 +27,7 @@ from app.trading.profit_protector import (
     net_pnl,
 )
 import app.trading.profit_protector as protector_module
+from app.shadow.notifier import ShadowNotifier
 
 
 D = Decimal
@@ -136,13 +137,13 @@ def test_trailing_update_never_moves_stop_backward() -> None:
 
 def test_early_exit_requires_profit_retracement_and_confirmed_reversal() -> None:
     item = position("Buy")
-    closes = [D("103")] * 16 + [D("104"), D("103.6"), D("103.1"), D("102.5")]
+    closes = [D("103")] * 16 + [D("104"), D("103.4"), D("102.5"), D("101.8")]
     bars = [ClosedBar(i, close, close + D("0.2"), close - D("0.2")) for i, close in enumerate(closes)]
     assert adverse_momentum_reversal("Buy", bars, D("0.8"))
     result = evaluate_protection(
         item,
-        bid=D("102.5"),
-        ask=D("102.51"),
+        bid=D("101.8"),
+        ask=D("101.81"),
         confirmed_stop=D("100.5"),
         previous_mfe=D("4"),
         stage="TRAILING_UPDATE",
@@ -150,6 +151,166 @@ def test_early_exit_requires_profit_retracement_and_confirmed_reversal() -> None
         slippage_per_leg=SLIPPAGE,
     )
     assert result.action == "EARLY_PROFIT_EXIT"
+
+
+@pytest.mark.parametrize(
+    ("side", "bid", "ask"),
+    [
+        ("Buy", D("100.70"), D("100.71")),
+        ("Sell", D("99.29"), D("99.30")),
+    ],
+)
+def test_profit_watch_activates_after_costs_and_point_two_r(
+    side: str, bid: Decimal, ask: Decimal
+) -> None:
+    result = evaluate_protection(
+        position(side),
+        bid=bid,
+        ask=ask,
+        confirmed_stop=position(side).stop_loss,
+        previous_mfe=D("0"),
+        stage="INITIAL",
+        bars=flat_bars(),
+        slippage_per_leg=SLIPPAGE,
+    )
+    assert result.action == "PROFIT_WATCH"
+    assert result.current_net_pnl > D("0")
+    assert result.max_favorable_excursion_usdt == result.current_net_pnl
+    assert result.giveback_pct == D("0")
+
+
+def test_profit_watch_does_nothing_when_net_gain_is_only_a_few_cents() -> None:
+    item = position("Buy")
+    result = evaluate_protection(
+        item,
+        bid=D("100.15"),
+        ask=D("100.16"),
+        confirmed_stop=item.stop_loss,
+        previous_mfe=D("0"),
+        stage="INITIAL",
+        bars=flat_bars(),
+        slippage_per_leg=SLIPPAGE,
+    )
+    assert result.action == "NONE"
+
+
+@pytest.mark.parametrize(
+    ("side", "bid", "ask"),
+    [
+        ("Buy", D("100.79"), D("100.80")),
+        ("Sell", D("99.21"), D("99.22")),
+    ],
+)
+def test_thirty_five_percent_mfe_giveback_tightens_stop_for_long_and_short(
+    side: str, bid: Decimal, ask: Decimal
+) -> None:
+    item = position(side)
+    result = evaluate_protection(
+        item,
+        bid=bid,
+        ask=ask,
+        confirmed_stop=item.stop_loss,
+        previous_mfe=D("1.0"),
+        stage="PROFIT_WATCH",
+        bars=flat_bars(),
+        slippage_per_leg=SLIPPAGE,
+    )
+    assert result.action == "MFE_PROFIT_PROTECT"
+    assert result.stop_loss is not None
+    assert result.giveback_pct >= D("35")
+    protected_net = net_pnl(
+        side,
+        item.entry_price,
+        result.stop_loss,
+        item.quantity,
+        item.entry_fee_usdt,
+        item.taker_fee_rate,
+        SLIPPAGE,
+    )
+    assert protected_net > D("0.30")
+
+
+def test_fifty_percent_giveback_without_momentum_reversal_does_not_close() -> None:
+    item = position("Buy")
+    result = evaluate_protection(
+        item,
+        bid=D("101.8"),
+        ask=D("101.81"),
+        confirmed_stop=D("100.20"),
+        previous_mfe=D("4"),
+        stage="MFE_PROFIT_PROTECT",
+        bars=flat_bars(D("101.8")),
+        slippage_per_leg=SLIPPAGE,
+    )
+    assert result.action != "EARLY_PROFIT_EXIT"
+
+
+def test_reversal_does_not_close_for_dust_profit_after_costs() -> None:
+    item = position("Buy")
+    closes = [D("101")] * 16 + [D("102"), D("101.4"), D("100.8"), D("100.2")]
+    bars = [
+        ClosedBar(i, close, close + D("0.2"), close - D("0.2"))
+        for i, close in enumerate(closes)
+    ]
+    result = evaluate_protection(
+        item,
+        bid=D("100.18"),
+        ask=D("100.19"),
+        confirmed_stop=D("100.10"),
+        previous_mfe=D("1"),
+        stage="PROFIT_WATCH",
+        bars=bars,
+        slippage_per_leg=SLIPPAGE,
+    )
+    assert result.giveback_pct >= D("50")
+    assert result.current_net_pnl > D("0")
+    assert result.action == "NONE"
+
+
+def test_watch_peak_still_protects_after_current_profit_falls_below_point_two_r() -> None:
+    item = position("Buy")
+    result = evaluate_protection(
+        item,
+        bid=D("100.46"),
+        ask=D("100.47"),
+        confirmed_stop=item.stop_loss,
+        previous_mfe=D("0.50"),
+        stage="PROFIT_WATCH",
+        bars=flat_bars(),
+        slippage_per_leg=SLIPPAGE,
+    )
+    assert result.current_r < D("0.20")
+    assert result.giveback_pct >= D("35")
+    assert result.action == "MFE_PROFIT_PROTECT"
+    assert result.stop_loss is not None and result.stop_loss > item.entry_price
+
+
+@pytest.mark.asyncio
+async def test_profit_watch_notification_contains_required_diagnostics() -> None:
+    class Bot:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_message(self, *args, **kwargs) -> None:
+            self.calls.append((args, kwargs))
+
+    notifier = ShadowNotifier(None, {42})
+    notifier.bot = Bot()
+    assert await notifier.profit_protection(
+        "PROFIT_WATCH",
+        "SOLUSDT",
+        None,
+        D("0.52"),
+        D("0.24"),
+        D("0.80"),
+        D("35"),
+    )
+    text = notifier.bot.calls[0][0][1]
+    assert "👀 <b>PROFIT WATCH</b>" in text
+    assert "Current PnL: $0.5200" in text
+    assert "MFE: $0.8000" in text
+    assert "Giveback: 35.0%" in text
+    assert "Action: PROFIT_WATCH" in text
 
 
 def test_state_survives_repository_restart(tmp_path) -> None:
@@ -250,6 +411,46 @@ async def test_local_monitor_is_ai_free_idempotent_and_restart_safe(tmp_path) ->
     await restarted.sync()
     await restarted.on_ticker("SOLUSDT", D("101.5"), D("101.51"))
     assert len(gateway.managed) == 1
+    assert len(notifier.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_profit_watch_is_notification_only_and_restart_idempotent(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'watch.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    preview = {
+        "symbol": "SOLUSDT", "quantity": "1", "entry": "100",
+        "stop_loss": "98", "take_profit": "104",
+    }
+    with sessions.begin() as session:
+        session.add(ControlledLiveProposalRecord(
+            proposal_id="proposal-watch", proposal_hash="w" * 64,
+            profile_name="profile", profile_hash="h" * 64,
+            selection_hash="s" * 64, admin_telegram_id=42,
+            source="AI_AUTONOMOUS_V1", preview_json=json.dumps(preview),
+            status="PROTECTED", client_order_id="owned-entry", created_at=now,
+            approved_at=now, submitted_at=now, completed_at=now, updated_at=now,
+        ))
+        session.add(ExecutionOrderRecord(
+            exchange="bybit", account_id="main", client_order_id="owned-entry",
+            symbol="SOLUSDT", side="BUY", quantity=D("1"), request_hash="r" * 64,
+            status="FILLED_PROTECTED", created_at=now, updated_at=now,
+        ))
+    gateway = FakeProtectionGateway()
+    notifier = FakeNotifier()
+    monitor = LocalPositionProfitProtector(sessions, gateway, notifier)
+    await monitor.sync()
+    await monitor.on_ticker("SOLUSDT", D("100.70"), D("100.71"))
+    assert gateway.managed == []
+    assert len(notifier.events) == 1
+    assert notifier.events[0][0] == "PROFIT_WATCH"
+
+    restarted = LocalPositionProfitProtector(sessions, gateway, notifier)
+    await restarted.sync()
+    await restarted.on_ticker("SOLUSDT", D("100.70"), D("100.71"))
+    assert gateway.managed == []
     assert len(notifier.events) == 1
 
 

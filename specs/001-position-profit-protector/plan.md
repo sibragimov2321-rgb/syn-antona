@@ -6,7 +6,7 @@
 
 ## Summary
 
-Add a local, deterministic monitor for bot-owned open Bybit positions. Public WebSocket prices and closed five-minute candles drive net-PnL/R thresholds; durable PostgreSQL state preserves initial risk, maximum favorable excursion, confirmed stop, and idempotency across restart. Every stop change and early exit reuses the existing production gateway and its private API safety boundary. No entry, strategy, initial SL/TP, scanner, symbol, leverage, or AI behavior changes.
+Add a local, deterministic monitor for bot-owned open Bybit positions. Public WebSocket prices and closed five-minute candles drive net-PnL/R thresholds; durable PostgreSQL state preserves initial risk, maximum favorable excursion, confirmed stop, and idempotency across restart. Extend the same monitor with a cost-aware `PROFIT WATCH`, 35% MFE-giveback protection, and 50% MFE-giveback early exit gated by confirmed adverse momentum. Every stop change and early exit reuses the existing production gateway and its private API safety boundary. No entry, strategy, initial SL/TP, scanner, symbol, leverage, or AI behavior changes.
 
 ## Technical Context
 
@@ -22,7 +22,7 @@ Add a local, deterministic monitor for bot-owned open Bybit positions. Public We
 
 **Project Type**: Long-running worker plus Telegram service
 
-**Performance Goals**: Process streaming ticks without blocking the five-minute entry scanner; at most one position refresh per 10 seconds and no AI calls from the monitor
+**Performance Goals**: Process streaming ticks without blocking the five-minute entry scanner; update MFE on every fresh WebSocket quote; at most one position refresh per 10 seconds and no AI calls from the monitor
 
 **Constraints**: No real test orders; no stop loosening; closed candles only for ATR/momentum; existing TP preserved; timeout/unknown fails closed; only ledger-owned positions may mutate
 
@@ -37,6 +37,7 @@ Add a local, deterministic monitor for bot-owned open Bybit positions. Public We
 - **Minimal and Backward-Compatible Changes — PASS**: one additive monitor, two additive tables, gateway extensions, notifier methods, and worker task wiring; entry flow and public contracts are unchanged.
 - **Evidence-Based Verification — PASS**: deterministic LONG/SHORT, threshold, restart, stale data, timeout, idempotency, notification, no-AI, gateway, migration, and regression tests are planned.
 - **Durable State and Operational Integrity — PASS**: state and event records are additive and authoritative across restart; no existing record is renamed or deleted.
+- **Early MFE amendment — PASS**: reuses existing state/event tables, stream, native-stop verification, and reduce-only close; no migration, entry-flow, or parameter changes outside the protector.
 - **Production release gate — PASS WITH SEPARATE RELEASE TASK**: code verification occurs before any deployment; deployment may enable only the new feature flag and must not send a test order.
 
 ## Project Structure
@@ -78,4 +79,3 @@ tests/
 ## Complexity Tracking
 
 No constitutional exceptions are required.
-

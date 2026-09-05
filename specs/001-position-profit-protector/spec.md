@@ -57,6 +57,24 @@ As the administrator, I want Telegram notifications for meaningful protection ch
 2. **Given** trailing tightens the stop, **When** Bybit confirms it, **Then** Telegram receives `TRAILING UPDATED`.
 3. **Given** a reversal causes an early reduce-only close, **When** the close is accepted and reconciled, **Then** Telegram receives `EARLY PROFIT EXIT`.
 
+---
+
+### User Story 4 - Protect early favorable excursions (Priority: P1)
+
+As the operator, I want every bot-owned real position watched tick-by-tick so a meaningful net favorable excursion is protected before the existing +0.5R break-even threshold when the market gives back a material portion of its MFE.
+
+**Why this priority**: A position can surrender a meaningful but sub-0.5R gain between scanner cycles; this feature is local risk reduction, not a new entry strategy.
+
+**Independent Test**: Feed deterministic LONG and SHORT WebSocket price paths, verify one `PROFIT WATCH` transition after costs, a monotonic stop update at 35% MFE giveback, and one early reduce-only close at 50% giveback plus confirmed adverse momentum.
+
+**Acceptance Scenarios**:
+
+1. **Given** net unrealized profit does not exceed round-trip costs plus the safety buffer and 0.20R, **When** fresh ticks arrive, **Then** no watch, stop update, or close is produced.
+2. **Given** net profit exceeds that floor, **When** the first qualifying fresh tick arrives, **Then** `PROFIT WATCH` is persisted and notified once without an exchange mutation.
+3. **Given** MFE is positive and net profit gives back at least 35% but less than 50%, **When** profit remains above the watch floor, **Then** a tighter native stop protects part of the remaining net profit.
+4. **Given** giveback reaches at least 50%, **When** confirmed closed five-minute candles show adverse momentum and the net exit remains meaningful after costs, **Then** one idempotent reduce-only early close is allowed.
+5. **Given** MFE continues to increase, **When** no giveback threshold is crossed, **Then** MFE is updated and the position is not closed early.
+
 ### Edge Cases
 
 - A position is missing its initial stop or take profit: fail closed, leave exchange protection untouched, and report the condition.
@@ -89,6 +107,11 @@ As the administrator, I want Telegram notifications for meaningful protection ch
 - **FR-016**: Notifications MUST be emitted only after confirmed state transitions and MUST use the exact labels `PROFIT PROTECTED`, `BREAK EVEN ACTIVATED`, `TRAILING UPDATED`, and `EARLY PROFIT EXIT`.
 - **FR-017**: Existing entry decisions, scanning, symbols, leverage, quantity sizing, original stop/target calculation, duplicate protection, reconciliation, kill switch, and emergency-close behavior MUST remain unchanged.
 - **FR-018**: Verification MUST use deterministic mocks and read-only checks; it MUST send zero real test orders.
+- **FR-019**: A `PROFIT WATCH` transition MUST require net profit to be at least the greater of 0.20R and estimated round-trip costs plus a $0.02 buffer.
+- **FR-020**: At 35% or greater drawdown from positive MFE, while meaningful net profit remains, the system MUST propose a monotonic native stop that locks a positive portion of the remaining profit.
+- **FR-021**: At 50% or greater drawdown from positive MFE, an early close MAY occur only with the existing confirmed adverse-momentum rule and meaningful positive net profit after costs.
+- **FR-022**: MFE giveback MUST be calculated as `(MFE - current net PnL) / MFE`, clamped to 0–100%, using executable bid for LONG and ask for SHORT.
+- **FR-023**: Telegram MUST notify only state transitions or confirmed mutations using `👀 PROFIT WATCH`, `🛡 PROFIT PROTECTED`, and `⚡ EARLY EXIT`, including current net PnL, MFE, giveback percentage, and action.
 
 ### Key Entities
 
@@ -107,6 +130,8 @@ As the administrator, I want Telegram notifications for meaningful protection ch
 - **SC-005**: Failure tests for stale data, rejected updates, timeouts, and mismatched verification produce zero unguarded or duplicate mutations.
 - **SC-006**: Monitoring and all protection tests make exactly zero AI requests and zero real test orders.
 - **SC-007**: Existing execution, scanner, reconciliation, Telegram, and startup regression tests continue to pass unchanged.
+- **SC-008**: Deterministic LONG and SHORT tests produce no action below the cost-aware watch floor, exactly one watch event above it, protection at 35% MFE giveback, and early exit only at 50% giveback with momentum reversal.
+- **SC-009**: Every notification reports the same persisted current PnL, MFE, giveback, and action used by the decision engine.
 
 ## Assumptions
 
@@ -115,5 +140,5 @@ As the administrator, I want Telegram notifications for meaningful protection ch
 - Adaptive trailing uses recent fully closed five-minute intervals; incomplete intervals cannot trigger a protection change or early exit.
 - A substantial favorable move means the position has reached at least +1R after costs.
 - A sharp reversal requires both adverse short-term momentum over consecutive closed intervals and a retracement from maximum favorable excursion; one transient tick is insufficient.
+- The fixed early-watch thresholds are 0.20R plus a cost-aware floor, 35% MFE giveback for stop tightening, and 50% MFE giveback plus confirmed reversal for early close; they are safety policy, not strategy optimization.
 - The system may use public streaming prices with authenticated position reads; exchange mutations remain routed through the existing production gateway.
-
