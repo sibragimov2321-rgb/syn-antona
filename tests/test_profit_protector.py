@@ -276,3 +276,25 @@ async def test_websocket_failure_enters_bounded_reconnect_path(tmp_path, monkeyp
     with pytest.raises(asyncio.CancelledError):
         await monitor.run()
     monitor.sync.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bybit_keepalive_uses_application_ping(monkeypatch) -> None:
+    sent: list[str] = []
+
+    class FakeWebSocket:
+        async def send(self, payload: str) -> None:
+            sent.append(payload)
+
+    sleeps = 0
+
+    async def one_ping_then_stop(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(protector_module.asyncio, "sleep", one_ping_then_stop)
+    with pytest.raises(asyncio.CancelledError):
+        await LocalPositionProfitProtector._send_bybit_keepalive(FakeWebSocket())
+    assert sent == [json.dumps({"op": "ping"})]

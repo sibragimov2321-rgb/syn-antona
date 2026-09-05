@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 from collections import defaultdict, deque
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
@@ -593,6 +594,13 @@ class LocalPositionProfitProtector:
             self.repository.finish_event(event_id, status="FAILED")
             raise
 
+    @staticmethod
+    async def _send_bybit_keepalive(ws: Any) -> None:
+        """Use Bybit's application heartbeat instead of WebSocket control pings."""
+        while True:
+            await asyncio.sleep(20)
+            await ws.send(json.dumps({"op": "ping"}))
+
     async def run(self) -> None:
         while True:
             try:
@@ -601,34 +609,59 @@ class LocalPositionProfitProtector:
                 # this socket connects is immediately observed after the next sync.
                 symbols = sorted(SCANNER_CONFIG.symbols)
                 topics = [f"tickers.{symbol}" for symbol in symbols] + [f"kline.5.{symbol}" for symbol in symbols]
-                async with websockets.connect(PUBLIC_LINEAR_WS, ping_interval=20, ping_timeout=10) as ws:
+                # Bybit expects an application-level {"op": "ping"}. Railway's
+                # network path intermittently drops WebSocket control-pong frames,
+                # so relying on the library ping caused healthy streams to reconnect
+                # every minute. The application heartbeat still detects a dead socket.
+                async with websockets.connect(
+                    PUBLIC_LINEAR_WS, ping_interval=None, close_timeout=5
+                ) as ws:
+                    keepalive = asyncio.create_task(self._send_bybit_keepalive(ws))
                     await ws.send(json.dumps({"op": "subscribe", "args": topics}))
-                    async for raw_message in ws:
-                        message = json.loads(raw_message)
-                        topic = str(message.get("topic") or "")
-                        data = message.get("data")
-                        if topic.startswith("tickers.") and isinstance(data, dict):
-                            symbol = topic.split(".")[-1]
-                            old_bid, old_ask = self.quotes.get(symbol, (Decimal(), Decimal()))
-                            bid = D(data.get("bid1Price")) or old_bid
-                            ask = D(data.get("ask1Price")) or old_ask
-                            self.quotes[symbol] = (bid, ask)
-                            message_ms = int(message.get("ts") or 0)
-                            if not message_ms or int(datetime.now(UTC).timestamp() * 1000) - message_ms <= 30_000:
-                                await self.on_ticker(symbol, bid, ask)
-                        elif topic.startswith("kline.5.") and isinstance(data, list):
-                            symbol = topic.split(".")[-1]
-                            for item in data:
-                                if item.get("confirm") is True:
-                                    bar = ClosedBar(
-                                        int(item["start"]), D(item["close"]), D(item["high"]), D(item["low"])
-                                    )
-                                    if not self.bars[symbol] or self.bars[symbol][-1].opened_at_ms != bar.opened_at_ms:
-                                        self.bars[symbol].append(bar)
-                        now = asyncio.get_running_loop().time()
-                        if now - self._last_sync >= 30:
-                            await self.sync()
-                            self._last_sync = now
+                    try:
+                        async for raw_message in ws:
+                            message = json.loads(raw_message)
+                            topic = str(message.get("topic") or "")
+                            data = message.get("data")
+                            if topic.startswith("tickers.") and isinstance(data, dict):
+                                symbol = topic.split(".")[-1]
+                                old_bid, old_ask = self.quotes.get(
+                                    symbol, (Decimal(), Decimal())
+                                )
+                                bid = D(data.get("bid1Price")) or old_bid
+                                ask = D(data.get("ask1Price")) or old_ask
+                                self.quotes[symbol] = (bid, ask)
+                                message_ms = int(message.get("ts") or 0)
+                                if (
+                                    not message_ms
+                                    or int(datetime.now(UTC).timestamp() * 1000) - message_ms
+                                    <= 30_000
+                                ):
+                                    await self.on_ticker(symbol, bid, ask)
+                            elif topic.startswith("kline.5.") and isinstance(data, list):
+                                symbol = topic.split(".")[-1]
+                                for item in data:
+                                    if item.get("confirm") is True:
+                                        bar = ClosedBar(
+                                            int(item["start"]),
+                                            D(item["close"]),
+                                            D(item["high"]),
+                                            D(item["low"]),
+                                        )
+                                        if (
+                                            not self.bars[symbol]
+                                            or self.bars[symbol][-1].opened_at_ms
+                                            != bar.opened_at_ms
+                                        ):
+                                            self.bars[symbol].append(bar)
+                            now = asyncio.get_running_loop().time()
+                            if now - self._last_sync >= 30:
+                                await self.sync()
+                                self._last_sync = now
+                    finally:
+                        keepalive.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await keepalive
             except asyncio.CancelledError:
                 raise
             except Exception:
