@@ -490,19 +490,12 @@ class LocalPositionProfitProtector:
             target = D(raw.get("takeProfit"))
             fill_average = filled_value / filled_quantity if filled_quantity > 0 else Decimal()
             position_key = f"{symbol}:{int(raw.get('positionIdx') or 0)}"
-            created_ms = int(raw.get("createdTime") or 0)
-            position_created = datetime.fromtimestamp(created_ms / 1000, UTC) if created_ms else None
             proposal_completed = proposal.completed_at or proposal.created_at
             if (
                 min(entry, quantity, stop, target, instrument.ask_price, tick, filled_quantity) <= 0
                 or quantity > filled_quantity
                 or abs(entry - fill_average) > tick
                 or (proposal.position_id and proposal.position_id != position_key)
-                or (
-                    position_created is not None
-                    and proposal_completed is not None
-                    and abs((position_created - proposal_completed).total_seconds()) > 600
-                )
             ):
                 logger.warning(
                     "profit_protector_position_ownership_mismatch", extra={"symbol": symbol}
@@ -519,7 +512,7 @@ class LocalPositionProfitProtector:
                 stop_loss=D(preview.get("stop_loss")) or stop,
                 take_profit=target,
                 position_idx=int(raw.get("positionIdx") or 0),
-                opened_at=position_created or proposal_completed,
+                opened_at=proposal_completed,
                 entry_client_order_id=proposal.client_order_id,
                 entry_fee_usdt=entry_fee,
                 taker_fee_rate=fee_rate,

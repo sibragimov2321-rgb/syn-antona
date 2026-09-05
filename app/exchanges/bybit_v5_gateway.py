@@ -682,12 +682,6 @@ class ProductionMutationGuard:
             proposal.position_id and proposal.position_id != live_key
         ):
             raise ControlledLiveBlocked("Live position identity does not match the owned entry")
-        created_at_ms = int(live.get("createdTime") or 0)
-        completed_at = _aware(proposal.completed_at) or _aware(proposal.created_at)
-        if created_at_ms and completed_at is not None:
-            opened_at = datetime.fromtimestamp(created_at_ms / 1000, UTC)
-            if abs((opened_at - completed_at).total_seconds()) > 600:
-                raise ControlledLiveBlocked("Live position timestamp does not match the owned entry")
         wallet = await self._http.private_get(
             "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"}
         )

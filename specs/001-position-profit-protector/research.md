@@ -26,7 +26,7 @@
 
 ## Decision: Only bot-owned and reconciled positions are mutable
 
-**Rationale**: The monitor resolves an open position to a durable protected proposal and execution-ledger row. Unknown manual/external positions are observed but never modified. Risk-reducing actions may operate after the ten-minute entry approval expires, but only with the exact original client ID, symbol, quantity bound, profile hash, protected ledger state, current exchange position, API permissions, and normal live gates.
+**Rationale**: The monitor resolves an open position to a durable protected proposal and execution-ledger row. Unknown manual/external positions are observed but never modified. Risk-reducing actions may operate after the ten-minute entry approval expires, but only with the exact original client ID, symbol, quantity bound, fill-average match, position ID, profile hash, protected ledger state, current exchange position, API permissions, and normal live gates. Bybit `createdTime` is deliberately not an ownership key because the exchange preserves it across later position lifecycles on the same symbol/position index.
 
 **Alternatives considered**: Managing every account position risks changing a manual trade. Reusing the entry approval TTL would disable profit protection on normal holding periods.
 
@@ -42,4 +42,3 @@
 - Bybit V5 public ticker stream documentation.
 - Bybit V5 kline stream documentation (`confirm=true` means closed).
 - Bybit V5 Set Trading Stop documentation and full-position modification behavior.
-
