@@ -22,6 +22,7 @@ from app.ai.service import OpenAICompatibleProvider
 from app.core.config import Settings
 from app.db import (
     AILiveDecisionRecord,
+    AIMarketDiscoveryRuntimeRecord,
     AILiveRuntimeRecord,
     AILiveScanRecord,
     BybitFeeRateCacheRecord,
@@ -156,6 +157,10 @@ class AILiveStatus:
     last_error: str | None
     decisions: tuple[dict[str, Any], ...]
     positions: tuple[dict[str, Any], ...]
+    core_hermes_calls_today: int
+    market_symbols_scanned: int
+    market_top_count: int
+    market_hermes_calls_today: int
 
 
 class AIMarketDataReader:
@@ -316,6 +321,19 @@ class AILiveRepository:
             runtime.scan_interval_seconds = settings.ai_scan_interval_seconds
             runtime.heartbeat_at = now
             runtime.updated_at = now
+
+    def record_hermes_call(self, now: datetime | None = None) -> None:
+        """Count actual outbound requests, including the one bounded JSON retry."""
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        with self.session_factory.begin() as session:
+            runtime = session.get(AILiveRuntimeRecord, AI_RUNTIME_NAME)
+            if runtime is None:
+                raise RuntimeError("AI runtime is missing")
+            if runtime.core_hermes_call_day != current.date():
+                runtime.core_hermes_call_day = current.date()
+                runtime.core_hermes_calls_today = 0
+            runtime.core_hermes_calls_today += 1
+            runtime.updated_at = current
 
     def save_fee_rates(self, rates: dict[str, BybitFeeRateSnapshot]) -> None:
         now = datetime.now(UTC)
@@ -507,8 +525,11 @@ class AILiveRepository:
             if runtime is None:
                 return AILiveStatus(
                     False, "NOT_DEPLOYED", "NOT_CONFIGURED", None, None,
-                    None, None, 0, 0, 0, None, (), (),
+                    None, None, 0, 0, 0, None, (), (), 0, 0, 0, 0,
                 )
+            discovery = session.get(
+                AIMarketDiscoveryRuntimeRecord, "HYBRID_MARKET_DISCOVERY"
+            )
             latest_scan = session.scalar(
                 select(AILiveScanRecord)
                 .where(AILiveScanRecord.status == "COMPLETED")
@@ -554,6 +575,23 @@ class AILiveRepository:
                 runtime.last_error,
                 decisions,
                 positions,
+                (
+                    runtime.core_hermes_calls_today
+                    if runtime.core_hermes_call_day == datetime.now(UTC).date()
+                    else 0
+                ),
+                discovery.symbols_scanned if discovery is not None else 0,
+                (
+                    len(json.loads(discovery.top_candidates_json or "[]"))
+                    if discovery is not None
+                    else 0
+                ),
+                (
+                    discovery.hermes_calls_today
+                    if discovery is not None
+                    and discovery.hermes_call_day == datetime.now(UTC).date()
+                    else 0
+                ),
             )
 
 
@@ -653,6 +691,23 @@ def _frame_payload(rows: tuple[ClosedCandle, ...]) -> dict[str, Any]:
         else Decimal()
     )
     latest = closes[-1]
+    trend = "NEUTRAL"
+    if (
+        indicators.ema_9 is not None
+        and indicators.ema_21 is not None
+        and indicators.macd is not None
+        and macd_signal is not None
+    ):
+        if (
+            latest > indicators.ema_9 > indicators.ema_21
+            and indicators.macd > macd_signal
+        ):
+            trend = "BULLISH"
+        elif (
+            latest < indicators.ema_9 < indicators.ema_21
+            and indicators.macd < macd_signal
+        ):
+            trend = "BEARISH"
     moves = {
         str(count): str(latest / closes[-1 - count] - 1)
         for count in (1, 3, 12)
@@ -660,6 +715,7 @@ def _frame_payload(rows: tuple[ClosedCandle, ...]) -> dict[str, Any]:
     }
     return {
         "last_closed_at": rows[-1].closed_at.isoformat(),
+        "trend": trend,
         "indicators": {
             "rsi_14": _value(indicators.rsi_14),
             "ema_9": _value(indicators.ema_9),
@@ -687,7 +743,7 @@ def _frame_payload(rows: tuple[ClosedCandle, ...]) -> dict[str, Any]:
                 str(item.close),
                 str(item.volume),
             ]
-            for item in rows[-40:]
+            for item in rows[-5:]
         ],
     }
 
@@ -904,7 +960,11 @@ def format_ai_live_status_ru(status: AILiveStatus) -> str:
         "NET R/R gate: ≥ 1.5 after fees/spread/slippage",
         "Same-symbol reversal/SL cooldown: 60m",
         "15m + 1h countertrend filter: ACTIVE",
-        "Scan interval: 5m",
+        "CORE AI SCAN: 8 / 5m",
+        f"MARKET LOCAL SCAN: {status.market_symbols_scanned} symbols / 5m",
+        f"MARKET TOP: {status.market_top_count}",
+        f"CORE HERMES CALLS TODAY: {status.core_hermes_calls_today}",
+        f"MARKET HERMES CALLS TODAY: {status.market_hermes_calls_today}",
         f"Last scan: {_time(status.last_scan_at)}",
         f"Total scans: {status.total_scans}",
         "",
@@ -1046,6 +1106,7 @@ class AIAutonomousTrader:
         self.repository = AILiveRepository(session_factory)
         self.controlled = ControlledLiveRepository(session_factory)
         self.provider = provider
+        self.provider.request_observer = self.repository.record_hermes_call
         self.market_reader = market_reader
         self.executor = AIAutonomousExecutionService(self.controlled, gateway)
         self.notifier = notifier

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     ai_required: bool = True
     ai_max_requests_per_hour: int = 60
     ai_max_requests_per_day: int = 500
+    # GET-only all-market discovery is isolated from the real execution
+    # allowlist and disabled for old deployments until its migration exists.
+    hybrid_market_scanner_enabled: bool = False
     # Local, deterministic management of existing real positions.  This is
     # independent from the AI scanner and is opt-in so an old deployment keeps
     # exactly its previous behaviour until the migration has been applied.
@@ -47,6 +50,10 @@ class Settings(BaseSettings):
     shadow_api_timeout_ms: int = 15_000
 
     def assert_safe_runtime(self) -> None:
+        if self.hybrid_market_scanner_enabled and not self.ai_trading_enabled:
+            raise RuntimeError(
+                "HYBRID_MARKET_SCANNER_ENABLED requires AI_TRADING_ENABLED"
+            )
         if self.live_trading_enabled and not self.controlled_live_enabled:
             raise RuntimeError(
                 "CONTROLLED_LIVE_ENABLED must also be true before live execution can arm."

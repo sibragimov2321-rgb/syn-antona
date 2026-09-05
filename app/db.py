@@ -359,12 +359,50 @@ class AILiveRuntimeRecord(Base):
     open_positions_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     open_orders: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_scans: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    core_hermes_call_day: Mapped[date | None] = mapped_column(Date, nullable=True)
+    core_hermes_calls_today: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     heartbeat_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class AIMarketDiscoveryRuntimeRecord(Base):
+    """Durable cadence, ranking and AI-call state for GET-only market discovery."""
+
+    __tablename__ = "ai_market_discovery_runtime"
+
+    runtime_name: Mapped[str] = mapped_column(String(48), primary_key=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="STARTING")
+    last_local_slot_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_local_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    symbols_scanned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    eligible_symbols: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    top_candidates_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    last_candidate_signature: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    last_candidate_score: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 10), nullable=True
+    )
+    last_hermes_call_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    hermes_call_day: Mapped[date | None] = mapped_column(Date, nullable=True)
+    hermes_calls_today: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_decisions_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
 
 

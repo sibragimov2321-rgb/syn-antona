@@ -231,6 +231,7 @@ def _full_batch():
 ])
 async def test_invalid_schema_or_incomplete_universe_has_one_ai_only_retry(monkeypatch, bad):
     requests = []
+    observed_requests = []
     original_client = httpx.AsyncClient
     valid = _full_batch()
 
@@ -244,12 +245,15 @@ async def test_invalid_schema_or_incomplete_universe_has_one_ai_only_retry(monke
     ))
     settings = Settings(ai_api_key="fixture-key", ai_model="hermes-agent",
                         ai_base_url="http://hermes.railway.internal:8642/v1")
-    result = await OpenAICompatibleProvider(settings).complete_json(
+    result = await OpenAICompatibleProvider(
+        settings, request_observer=lambda: observed_requests.append("sent")
+    ).complete_json(
         "original closed market data", AIBatchDecision,
         expected_symbols=frozenset(SCANNER_CONFIG.symbols),
     )
     assert result == valid
     assert len(requests) == 2
+    assert observed_requests == ["sent", "sent"]
     assert requests[1]["messages"][:-1] == requests[0]["messages"]
     assert requests[1]["messages"][-1]["content"].startswith("RETURN VALID JSON ONLY")
     assert "not json" not in requests[1]["messages"][-1]["content"]

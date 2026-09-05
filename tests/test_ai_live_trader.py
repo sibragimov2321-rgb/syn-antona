@@ -302,6 +302,17 @@ def test_prompt_contains_every_symbol_and_closed_indicators() -> None:
         assert symbol in prompt
     assert '"rsi_14"' in prompt
     assert '"macd_signal"' in prompt
+    payload = json.loads(prompt)
+    assert sum(
+        len(frame["candles"])
+        for symbol in payload["symbols"]
+        for frame in symbol["timeframes"].values()
+    ) == 8 * 3 * 5
+    assert all(
+        frame["trend"] in {"BULLISH", "BEARISH", "NEUTRAL"}
+        for symbol in payload["symbols"]
+        for frame in symbol["timeframes"].values()
+    )
 
 
 def test_prompt_uses_verified_real_fees_and_unchanged_net_cost_formula():

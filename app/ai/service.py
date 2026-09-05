@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -121,7 +122,13 @@ def parse_hermes_response(
 
 class OpenAICompatibleProvider(AIProvider):
     """OpenAI/OpenRouter compatible HTTP client. Output is always parsed as untrusted JSON."""
-    def __init__(self, settings: Settings): self.settings = settings
+    def __init__(
+        self,
+        settings: Settings,
+        request_observer: Callable[[], None] | None = None,
+    ):
+        self.settings = settings
+        self.request_observer = request_observer
     async def complete(self, prompt: str, schema: type[AIResult]) -> dict:
         return await self.complete_json(prompt, schema)
 
@@ -207,6 +214,8 @@ class OpenAICompatibleProvider(AIProvider):
                 # One bounded *AI-only* retry for invalid Hermes output. HTTP,
                 # authentication, rate-limit and timeout failures are not retried.
                 for attempt in range(2 if private_hermes else 1):
+                    if self.request_observer is not None:
+                        self.request_observer()
                     response = await client.post(f"{base}/chat/completions", headers=headers, json=body)
                     if response.status_code == 429: raise AIRateLimited("AI rate limited")
                     response.raise_for_status()

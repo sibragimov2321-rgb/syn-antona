@@ -15,6 +15,11 @@ from app.ai.live_trader import (
     AILiveRepository,
     AIMarketDataReader,
 )
+from app.ai.market_discovery import (
+    BybitAllMarketReader,
+    HybridMarketDiscoveryService,
+    MarketDiscoveryRepository,
+)
 from app.ai.service import OpenAICompatibleProvider
 from app.db import (
     ControlledLiveRuntimeRecord,
@@ -113,6 +118,8 @@ async def run(poll_seconds: int = 60) -> None:
     coordinator = None
     ai_trader = None
     protector_task = None
+    market_discovery = None
+    market_discovery_task = None
     current_task = asyncio.current_task()
     loop = asyncio.get_running_loop()
     installed: list[signal.Signals] = []
@@ -146,6 +153,17 @@ async def run(poll_seconds: int = 60) -> None:
                 gateway,
                 notifier,
             )
+            if settings.hybrid_market_scanner_enabled:
+                market_repository = MarketDiscoveryRepository(SessionLocal)
+                market_repository.initialize()
+                market_discovery = HybridMarketDiscoveryService(
+                    market_repository,
+                    BybitAllMarketReader.from_environment(),
+                    OpenAICompatibleProvider(settings),
+                )
+                market_discovery_task = asyncio.create_task(
+                    market_discovery.run(), name="hybrid-market-discovery"
+                )
         else:
             signal_engine = ControlledLiveSignalEngine(SessionLocal)
             coordinator = MultiSymbolFirstProposalCoordinator(
@@ -168,6 +186,9 @@ async def run(poll_seconds: int = 60) -> None:
                 "ai_trading_enabled": settings.ai_trading_enabled,
                 "position_profit_protector": (
                     "ACTIVE" if settings.position_profit_protector_enabled else "OFF"
+                ),
+                "hybrid_market_scanner": (
+                    "ACTIVE" if settings.hybrid_market_scanner_enabled else "OFF"
                 ),
                 "dry_run": settings.dry_run,
                 "real_order_execution_enabled": bool(
@@ -241,6 +262,9 @@ async def run(poll_seconds: int = 60) -> None:
                 )
             await asyncio.sleep(poll_seconds)
     finally:
+        if market_discovery_task is not None:
+            market_discovery_task.cancel()
+            await asyncio.gather(market_discovery_task, return_exceptions=True)
         if protector_task is not None:
             protector_task.cancel()
             await asyncio.gather(protector_task, return_exceptions=True)
@@ -254,6 +278,8 @@ async def run(poll_seconds: int = 60) -> None:
             await coordinator.close()
         if ai_trader is not None:
             await ai_trader.close()
+        if market_discovery is not None:
+            await market_discovery.close()
         if gateway is not None:
             await gateway.close()
         if signal_engine is not None:
