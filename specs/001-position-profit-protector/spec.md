@@ -112,6 +112,7 @@ As the operator, I want every bot-owned real position watched tick-by-tick so a 
 - **FR-021**: At 50% or greater drawdown from positive MFE, an early close MAY occur only with the existing confirmed adverse-momentum rule and meaningful positive net profit after costs.
 - **FR-022**: MFE giveback MUST be calculated as `(MFE - current net PnL) / MFE`, clamped to 0–100%, using executable bid for LONG and ask for SHORT.
 - **FR-023**: Telegram MUST notify only state transitions or confirmed mutations using `👀 PROFIT WATCH`, `🛡 PROFIT PROTECTED`, and `⚡ EARLY EXIT`, including current net PnL, MFE, giveback percentage, and action.
+- **FR-024**: A Bybit `symbol:positionIdx` slot MAY be reused by a later entry. Historical state MUST remain intact, the superseded state MUST be closed, and the new entry MUST receive an independent active protection state without a uniqueness failure.
 
 ### Key Entities
 

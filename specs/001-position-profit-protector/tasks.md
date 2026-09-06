@@ -62,7 +62,14 @@
 - [x] T022 Persist and deduplicate notification-only `PROFIT WATCH` transitions using the existing event/state tables
 - [x] T023 Extend Telegram protection notifications with exact watch/protect/exit labels and current PnL/MFE/giveback/action
 - [x] T024 Add deterministic threshold, no-premature-exit, monotonic-stop, restart/idempotency, notifier, and zero-AI tests
-- [ ] T025 Run targeted tests, full suite, lint, migration-head check, and production startup/runtime verification; send zero real test orders
+- [x] T025 Run targeted tests, full suite, lint, migration-head check, and production startup/runtime verification; send zero real test orders
+
+## Phase 8: Reused Bybit position-slot regression
+
+- [x] T026 Replace lifetime `position_key` uniqueness with a non-unique lookup index while preserving all historical rows.
+- [x] T027 Atomically close a superseded active state when a verified new entry reuses the same `symbol:positionIdx`.
+- [x] T028 Add a regression test reproducing the production `ADAUSDT:0` conflict and verify restart-safe state isolation.
+- [ ] T029 Run targeted/full tests, lint, clean migration upgrade, deploy, and read-only runtime verification with zero test orders.
 
 ## Dependencies & Execution Order
 

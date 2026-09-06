@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from dataclasses import replace
 from decimal import Decimal
 import asyncio
 import json
@@ -327,6 +328,30 @@ def test_state_survives_repository_restart(tmp_path) -> None:
     assert Decimal(restored.initial_risk_usdt) == risk
     assert restored.stage == "INITIAL"
     assert Decimal(restored.confirmed_stop_loss) == D("99")
+
+
+def test_new_entry_can_reuse_closed_bybit_position_slot(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'reused-position-slot.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    repository = PositionProfitRepository(sessions)
+    previous = position()
+    risk = initial_risk_usdt(previous, SLIPPAGE)
+    repository.upsert(previous, D("101"), risk, D("0.08"), D("99"))
+
+    current = replace(
+        previous,
+        entry_client_order_id="new-owned-entry",
+        opened_at=datetime.now(UTC),
+    )
+    repository.upsert(current, D("100.5"), risk, D("0.08"), D("99"))
+
+    with sessions() as session:
+        old_state = session.get(PositionProfitStateRecord, previous.entry_client_order_id)
+        new_state = session.get(PositionProfitStateRecord, current.entry_client_order_id)
+        assert old_state is not None and old_state.closed_at is not None
+        assert new_state is not None and new_state.closed_at is None
+        assert old_state.position_key == new_state.position_key == "SOLUSDT:0"
 
 
 class FakeProtectionGateway:

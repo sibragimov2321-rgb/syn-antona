@@ -862,7 +862,9 @@ class PositionProfitStateRecord(Base):
     __tablename__ = "position_profit_states"
 
     entry_client_order_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    position_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Bybit reuses symbol:positionIdx after a position closes. The durable
+    # entry id is the identity; position_key is a non-unique lookup key.
+    position_key: Mapped[str] = mapped_column(String(64), index=True)
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)

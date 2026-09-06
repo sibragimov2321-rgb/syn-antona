@@ -38,6 +38,7 @@ Add a local, deterministic monitor for bot-owned open Bybit positions. Public We
 - **Evidence-Based Verification — PASS**: deterministic LONG/SHORT, threshold, restart, stale data, timeout, idempotency, notification, no-AI, gateway, migration, and regression tests are planned.
 - **Durable State and Operational Integrity — PASS**: state and event records are additive and authoritative across restart; no existing record is renamed or deleted.
 - **Early MFE amendment — PASS**: reuses existing state/event tables, stream, native-stop verification, and reduce-only close; no migration, entry-flow, or parameter changes outside the protector.
+- **Reusable Bybit slot repair — PASS**: replaces the incorrect lifetime uniqueness of `symbol:positionIdx` with indexed history and atomically retires a superseded active state only after a new bot-owned position has passed the existing ownership checks.
 - **Production release gate — PASS WITH SEPARATE RELEASE TASK**: code verification occurs before any deployment; deployment may enable only the new feature flag and must not send a test order.
 
 ## Project Structure

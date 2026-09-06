@@ -371,12 +371,36 @@ class PositionProfitRepository:
         confirmed_stop: Decimal,
     ) -> PositionProfitStateRecord:
         now = datetime.now(UTC)
+        position_key = f"{position.symbol}:{position.position_idx}"
         with self._sessions.begin() as session:
             row = session.get(PositionProfitStateRecord, position.entry_client_order_id)
             if row is None:
+                superseded = session.scalars(
+                    select(PositionProfitStateRecord)
+                    .where(
+                        PositionProfitStateRecord.position_key == position_key,
+                        PositionProfitStateRecord.entry_client_order_id
+                        != position.entry_client_order_id,
+                        PositionProfitStateRecord.closed_at.is_(None),
+                    )
+                    .with_for_update()
+                ).all()
+                for previous in superseded:
+                    previous.closed_at = now
+                    previous.updated_at = now
+                    pending_events = session.scalars(
+                        select(PositionProtectionEventRecord).where(
+                            PositionProtectionEventRecord.entry_client_order_id
+                            == previous.entry_client_order_id,
+                            PositionProtectionEventRecord.status.in_(("PENDING", "UNKNOWN")),
+                        )
+                    ).all()
+                    for event in pending_events:
+                        event.status = "SUPERSEDED"
+                        event.updated_at = now
                 row = PositionProfitStateRecord(
                     entry_client_order_id=position.entry_client_order_id,
-                    position_key=f"{position.symbol}:{position.position_idx}",
+                    position_key=position_key,
                     symbol=position.symbol,
                     side=position.side,
                     quantity=position.quantity,
